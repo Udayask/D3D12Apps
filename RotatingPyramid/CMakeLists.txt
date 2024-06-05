@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15.0)
+cmake_minimum_required(VERSION 3.5)
 
 set(${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 
@@ -17,6 +17,11 @@ set(SourceFiles
 )
 
 add_executable(RotatingPyramid WIN32 ${SourceFiles} ${Shaders})
+
+if (MSVC)
+  set_target_properties(RotatingPyramid PROPERTIES
+			MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 target_link_libraries(RotatingPyramid d3d12.lib dxgi.lib)
 
