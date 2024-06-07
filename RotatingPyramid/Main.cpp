@@ -102,6 +102,8 @@ private:
     UINT                       rtvDescriptorSize = 0;
     D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_0;
 
+    D3D12_FEATURE_DATA_D3D12_OPTIONS featureDataOpts;
+
 #ifdef _DEBUG
     static inline const bool enableDebugLayers = true;
 #else
@@ -298,6 +300,9 @@ void Harmony::CreateDevice() {
     delQ.Append([cDevice = pDevice9] {
         cDevice->Release();
     });
+
+    // Query feature 
+    pDevice9->CheckFeatureSupport(D3D12_FEATURE::D3D12_FEATURE_D3D12_OPTIONS, &featureDataOpts, sizeof featureDataOpts);
 }
 
 void Harmony::CreateCommandQueue() {
