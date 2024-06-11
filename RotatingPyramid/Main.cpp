@@ -476,18 +476,49 @@ void Harmony::CreateResourcesAndViews() {
 }
 
 void Harmony::CreatePipelines() {
-    // root signature (empty except for flags)
+    // root signature has 3 params for the shader
     {
-        D3D12_ROOT_SIGNATURE_DESC rDesc{
-            .NumParameters = 0,
-            .pParameters = nullptr,
+        D3D12_FEATURE_DATA_ROOT_SIGNATURE rootFeatures = {};
+
+        rootFeatures.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+
+        if (FAILED(pDevice9->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &rootFeatures, sizeof rootFeatures))) {
+            rootFeatures.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1;
+        }
+
+        D3D12_ROOT_PARAMETER    rootParams[3];
+
+        D3D12_DESCRIPTOR_RANGE  descRange[3] = {
+            {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
+            {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
+            {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
+        };
+
+        rootParams[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[0].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[0].DescriptorTable.pDescriptorRanges   = &descRange[0];
+        rootParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_VERTEX;
+
+        rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[1].DescriptorTable.pDescriptorRanges   = &descRange[1];
+        rootParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        rootParams[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[2].DescriptorTable.pDescriptorRanges   = &descRange[2];
+        rootParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+        D3D12_ROOT_SIGNATURE_DESC rDesc {
+            .NumParameters     = 3,
+            .pParameters       = rootParams,
             .NumStaticSamplers = 0,
-            .pStaticSamplers = nullptr,
-            .Flags = D3D12_ROOT_SIGNATURE_FLAGS::D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
+            .pStaticSamplers   = nullptr,
+            .Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
         };
 
         ComPtr<ID3DBlob> signature;
-        if (FAILED(D3D12SerializeRootSignature(&rDesc, D3D_ROOT_SIGNATURE_VERSION::D3D_ROOT_SIGNATURE_VERSION_1_0, &signature, nullptr))) {
+        if (FAILED(D3D12SerializeRootSignature(&rDesc, rootFeatures.HighestVersion, &signature, nullptr))) {
             throw std::runtime_error("Could not serialize root desc!");
         }
 
@@ -552,6 +583,7 @@ void Harmony::CreatePipelines() {
         rastDesc.MultisampleEnable     = FALSE;
         rastDesc.AntialiasedLineEnable = FALSE;
         rastDesc.ForcedSampleCount     = 0;
+        rastDesc.ConservativeRaster    = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
 
         D3D12_DEPTH_STENCILOP_DESC defaultStencilOp = {
             D3D12_STENCIL_OP_KEEP,
