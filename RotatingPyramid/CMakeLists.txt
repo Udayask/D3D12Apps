@@ -23,7 +23,7 @@ if (MSVC)
 			MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-target_link_libraries(RotatingPyramid d3d12.lib dxgi.lib)
+target_link_libraries(RotatingPyramid d3d12.lib dxgi.lib D3DCompiler.lib)
 
 add_custom_target(CopyResources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/RotatingPyramid/shaders ${PROJECT_BINARY_DIR}/RotatingPyramid/shaders
