@@ -76,8 +76,8 @@ public:
     void Resize();
 
 private:
-    inline uint32_t GetSizeInMB(uint64_t sizeInBytes) {
-        return (sizeInBytes >> 20) & 0xffffffff;
+    inline uint32_t GetSizeInMB(UINT64 sizeInBytes) {
+        return (sizeInBytes >> 20) & 0xFFFFFFFF;
     }
 
     void OpenWindow(HINSTANCE instance);
@@ -118,6 +118,10 @@ private:
     ID3D12PipelineState*       pPipelineState    = nullptr;
 
     ID3D12Resource*            pConstantBuffers[MAX_FRAMES_IN_FLIGHT] = { nullptr };
+    ID3D12Resource*            pDepthBuffer      = nullptr;
+    ID3D12Resource*            pTexture          = nullptr;
+    ID3D12Resource*            pVertexBuffer     = nullptr;
+    ID3D12Resource*            pIndexBuffer      = nullptr;
 
     HINSTANCE                  hInstance         = NULL;
     HWND                       hMainWindow       = NULL;
@@ -125,7 +129,7 @@ private:
     UINT                       frameIndex        = 0;
     HANDLE                     fenceHandle       = NULL;
     UINT64                     fenceValues[MAX_FRAMES_IN_FLIGHT] = { 0 };
-    UINT64                     maxChunkSizes[2]     = { 0 };
+    UINT64                     maxChunkSizes[2]     = { DEFAULT_CHUNK_SIZE, UPLOAD_CHUNK_SIZE };
 
     UINT                       rtvDescriptorSize = 0;
     D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_0;
@@ -447,8 +451,8 @@ void Harmony::CreateHeaps() {
         return memHeap.Detach();
     };
 
-    pHeaps[0] = AllocateHeap(GetSizeInMB(maxChunkSizes[0]), D3D12_HEAP_TYPE_DEFAULT);
-    pHeaps[1] = AllocateHeap(GetSizeInMB(maxChunkSizes[1]), D3D12_HEAP_TYPE_UPLOAD);
+    pHeaps[0] = AllocateHeap(DEFAULT_CHUNK_SIZE, D3D12_HEAP_TYPE_DEFAULT);
+    pHeaps[1] = AllocateHeap(UPLOAD_CHUNK_SIZE, D3D12_HEAP_TYPE_UPLOAD);
 
     delQ.Append([cHeaps = pHeaps] {
         cHeaps[1]->Release();
@@ -474,21 +478,16 @@ void Harmony::CreateResourcesAndViews() {
     }
     
     {
-        D3D12_CLEAR_VALUE clearVal {
-            .Format = DXGI_FORMAT_R8_UINT,
-            .Color = { 0.0f, 0.0f, 0.0f, 0.0f }
-        };
-
         D3D12_RESOURCE_DESC cbDesc {
             .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
             .Alignment        = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT,
             .Width            = sizeof(UniformBuffer),
             .Height           = 1,
-            .DepthOrArraySize = 0,
-            .MipLevels        = 0,
-            .Format           = DXGI_FORMAT_R8_UINT,
-            .SampleDesc       = { 0 },
-            .Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            .DepthOrArraySize = 1,
+            .MipLevels        = 1,
+            .Format           = DXGI_FORMAT_UNKNOWN,
+            .SampleDesc       = { .Count = 1, .Quality = 0 },
+            .Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
             .Flags            = D3D12_RESOURCE_FLAG_NONE,
         };
 
@@ -498,7 +497,7 @@ void Harmony::CreateResourcesAndViews() {
         }
 
         for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-            if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &cbDesc, D3D12_RESOURCE_STATE_COMMON, &clearVal, IID_PPV_ARGS(&pConstantBuffers[i])))) {
+            if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &cbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pConstantBuffers[i])))) {
                 throw std::runtime_error("Could not create constant buffer!");
             }
             
@@ -506,13 +505,107 @@ void Harmony::CreateResourcesAndViews() {
         }
     }
     
-    // TODO: Create depth buffer 
+    {
+        D3D12_CLEAR_VALUE dsVal {
+            .Format = DXGI_FORMAT_D32_FLOAT,
+            .Color = { 0.0f, 0.0f, 0.0f, 0.0f }
+        };
 
-    // TODO: Create texture       (upload data)  
+        D3D12_RESOURCE_DESC depthDesc {
+            .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            .Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width     = WINDOW_WIDTH,
+            .Height    = WINDOW_HEIGHT,
+            .DepthOrArraySize = 1,
+            .MipLevels = 1,
+            .Format = DXGI_FORMAT_D32_FLOAT,
+            .SampleDesc = {.Count = 1, .Quality = 0 },
+            .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            .Flags  = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+        };
 
-    // TODO: Create vertex buffer (upload date)
+        D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &depthDesc);
+        
+        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &depthDesc, D3D12_RESOURCE_STATE_COMMON, &dsVal, IID_PPV_ARGS(&pDepthBuffer)))) {
+            throw std::runtime_error("Could not create depth buffer!");
+        }
 
-    // TODO: Create index buffer  (upload data)
+        defaultHeapOffset += resInfo.SizeInBytes;
+    }
+
+    {
+        D3D12_CLEAR_VALUE texVal {
+            .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .Color = { 0.0f, 0.0f, 0.0f, 0.0f }
+        };
+
+        D3D12_RESOURCE_DESC texDesc {
+            .Dimension  = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width      = 512,
+            .Height     = 512,
+            .DepthOrArraySize = 1,
+            .MipLevels  = 9,
+            .Format     = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .SampleDesc = {.Count = 1, .Quality = 0 },
+            .Layout     = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
+            .Flags      = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+        };
+
+        D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &texDesc);
+
+        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &texDesc, D3D12_RESOURCE_STATE_COMMON, &texVal, IID_PPV_ARGS(&pTexture)))) {
+            throw std::runtime_error("Could not create texture!");
+        }
+
+        defaultHeapOffset += resInfo.SizeInBytes;
+    }
+
+    {
+        D3D12_RESOURCE_DESC vbDesc {
+            .Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER,
+            .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width      = 512,
+            .Height     = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels  = 1,
+            .Format     = DXGI_FORMAT_UNKNOWN,
+            .SampleDesc = {.Count = 1, .Quality = 0 },
+            .Layout     = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            .Flags      = D3D12_RESOURCE_FLAG_NONE
+        };
+
+        D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &vbDesc);
+
+        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
+            throw std::runtime_error("Could not create texture!");
+        }
+
+        defaultHeapOffset += resInfo.SizeInBytes;
+    }
+
+    {
+        D3D12_RESOURCE_DESC ibDesc{
+            .Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER,
+            .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width      = 512,
+            .Height     = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels  = 1,
+            .Format     = DXGI_FORMAT_UNKNOWN,
+            .SampleDesc = {.Count = 1, .Quality = 0 },
+            .Layout     = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            .Flags      = D3D12_RESOURCE_FLAG_NONE
+        };
+
+        D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &ibDesc);
+
+        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
+            throw std::runtime_error("Could not create texture!");
+        }
+
+        defaultHeapOffset += resInfo.SizeInBytes;
+    }
 }
 
 void Harmony::CreatePipelines() {
