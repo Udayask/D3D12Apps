@@ -117,6 +117,8 @@ private:
     ID3D12RootSignature*       pRootSignature    = nullptr;
     ID3D12PipelineState*       pPipelineState    = nullptr;
 
+    ID3D12Resource*            pConstantBuffers[MAX_FRAMES_IN_FLIGHT] = { nullptr };
+
     HINSTANCE                  hInstance         = NULL;
     HWND                       hMainWindow       = NULL;
 
@@ -236,7 +238,7 @@ void Harmony::OpenWindow(HINSTANCE instance) {
         throw std::runtime_error("Could not register class!");
     }
 
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenWidth  = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
     int windowX = screenWidth / 2 - WINDOW_WIDTH / 2;
@@ -455,19 +457,55 @@ void Harmony::CreateHeaps() {
 }
 
 void Harmony::CreateResourcesAndViews() {
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = pRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    UINT64 defaultHeapOffset = 0;
+    UINT64 uploadHeapOffset  = 0;
 
-    for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        if (FAILED(pSwapChain4->GetBuffer(i, IID_PPV_ARGS(&pRenderTargets[i])))) {
-            throw std::runtime_error("Could not Get swap chain buffer!");
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = pRtvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (FAILED(pSwapChain4->GetBuffer(i, IID_PPV_ARGS(&pRenderTargets[i])))) {
+                throw std::runtime_error("Could not Get swap chain buffer!");
+            }
+
+            pDevice9->CreateRenderTargetView(pRenderTargets[i], nullptr, rtvHandle);
+            rtvHandle.ptr += rtvDescriptorSize;
+        }
+    }
+    
+    {
+        D3D12_CLEAR_VALUE clearVal {
+            .Format = DXGI_FORMAT_R8_UINT,
+            .Color = { 0.0f, 0.0f, 0.0f, 0.0f }
+        };
+
+        D3D12_RESOURCE_DESC cbDesc {
+            .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
+            .Alignment        = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width            = sizeof(UniformBuffer),
+            .Height           = 1,
+            .DepthOrArraySize = 0,
+            .MipLevels        = 0,
+            .Format           = DXGI_FORMAT_R8_UINT,
+            .SampleDesc       = { 0 },
+            .Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            .Flags            = D3D12_RESOURCE_FLAG_NONE,
+        };
+
+        D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &cbDesc);
+        if (resInfo.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+            cbDesc.Alignment = resInfo.Alignment;
         }
 
-        pDevice9->CreateRenderTargetView(pRenderTargets[i], nullptr, rtvHandle);
-        rtvHandle.ptr += rtvDescriptorSize;
+        for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &cbDesc, D3D12_RESOURCE_STATE_COMMON, &clearVal, IID_PPV_ARGS(&pConstantBuffers[i])))) {
+                throw std::runtime_error("Could not create constant buffer!");
+            }
+            
+            uploadHeapOffset += resInfo.Alignment;
+        }
     }
-
-    // TODO: create constant buffers
-
+    
     // TODO: Create depth buffer 
 
     // TODO: Create texture       (upload data)  
@@ -478,6 +516,8 @@ void Harmony::CreateResourcesAndViews() {
 }
 
 void Harmony::CreatePipelines() {
+    ComPtr<ID3DBlob>            errBlob;
+
     // root signature has 3 params for the shader
     {
         D3D12_FEATURE_DATA_ROOT_SIGNATURE rootFeatures = {};
@@ -626,9 +666,7 @@ void Harmony::CreatePipelines() {
         psoDesc.CachedPSO             = { .pCachedBlob = nullptr, .CachedBlobSizeInBytes = 0 };
         psoDesc.Flags                 = D3D12_PIPELINE_STATE_FLAG_NONE;
 
-        HRESULT hr = pDevice9->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso));
-
-        if(FAILED(hr)) {
+        if(FAILED(pDevice9->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso)))) {
             throw std::runtime_error("Could not create pipeline state object!");
         }
 
