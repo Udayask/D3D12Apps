@@ -203,6 +203,8 @@ void Harmony::Run() {
 void Harmony::Shutdown() {
     WaitForGpu();
 
+
+
     delQ.Finalize();
 }
 
@@ -502,12 +504,12 @@ void Harmony::CreatePipelines() {
         rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
         rootParams[1].DescriptorTable.pDescriptorRanges   = &descRange[1];
-        rootParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        rootParams[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
         rootParams[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
         rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
         rootParams[2].DescriptorTable.pDescriptorRanges   = &descRange[2];
-        rootParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        rootParams[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rDesc {
             .NumParameters     = 3,
@@ -518,8 +520,11 @@ void Harmony::CreatePipelines() {
         };
 
         ComPtr<ID3DBlob> signature;
-        if (FAILED(D3D12SerializeRootSignature(&rDesc, rootFeatures.HighestVersion, &signature, nullptr))) {
-            throw std::runtime_error("Could not serialize root desc!");
+        ComPtr<ID3DBlob> errBlob;
+
+        // FIXME: Root signature version 1_1 not working
+        if (FAILED(D3D12SerializeRootSignature(&rDesc, /*rootFeatures.HighestVersion*/ D3D_ROOT_SIGNATURE_VERSION_1, &signature, &errBlob))) {
+            throw std::runtime_error(reinterpret_cast<const char*>(errBlob->GetBufferPointer()));
         }
 
         ComPtr<ID3D12RootSignature> rs;
@@ -722,7 +727,9 @@ void Harmony::Render() {
 
 void Harmony::PopulateCommandList() {
     pCommandAllocators[frameIndex]->Reset();
-    pCommandList->Reset(pCommandAllocators[frameIndex], nullptr);
+    pCommandList->Reset(pCommandAllocators[frameIndex], pPipelineState);
+
+    pCommandList->SetGraphicsRootSignature(pRootSignature);
 
     D3D12_RESOURCE_BARRIER rtBarrier {
         .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
