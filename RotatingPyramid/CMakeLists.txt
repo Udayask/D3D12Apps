@@ -25,13 +25,13 @@ endif()
 
 target_link_libraries(RotatingPyramid d3d12.lib dxgi.lib D3DCompiler.lib)
 
-add_custom_target(CopyResources ALL
+add_custom_target(CopyResourcesRP ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/RotatingPyramid/shaders ${PROJECT_BINARY_DIR}/RotatingPyramid/shaders
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/RotatingPyramid/textures ${PROJECT_BINARY_DIR}/RotatingPyramid/textures
     COMMENT "Copying resources to binary directory..."
 )
 
-add_dependencies(RotatingPyramid CopyResources)
+add_dependencies(RotatingPyramid CopyResourcesRP)
 
 if (MSVC)
     # Tell MSVC to use main instead of WinMain for Windows subsystem executables
