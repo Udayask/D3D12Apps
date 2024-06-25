@@ -135,7 +135,7 @@ private:
 
     UINT                       rtvDescriptorSize = 0;
     UINT                       dsvDescriptorSize = 0;
-    D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_0;
+    D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_2;
     D3D12_VIEWPORT             viewport;
     D3D12_RECT                 scissorRect;
 
@@ -175,14 +175,6 @@ bool Harmony::Init(HINSTANCE inst) {
         CreateCommandLists();
 
         CreateSyncObjects();
-
-        //BeginOnetime
-
-
-        //end onetime
-
-        //etc
-
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;

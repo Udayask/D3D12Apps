@@ -19,8 +19,8 @@ set(SourceFiles
 add_executable(RotatingPyramid WIN32 ${SourceFiles} ${Shaders})
 
 if (MSVC)
-  set_target_properties(RotatingPyramid PROPERTIES
-			MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  set_target_properties(RotatingPyramid PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  set_property(SOURCE ${Shaders} PROPERTY VS_SETTINGS "ExcludedFromBuild=true")
 endif()
 
 target_link_libraries(RotatingPyramid d3d12.lib dxgi.lib D3DCompiler.lib)

@@ -21,7 +21,7 @@
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;
 
-#define APPLICATION_NAME        "Rotating Pyramid"
+#define APPLICATION_NAME        "Mesh Render"
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
 
@@ -107,7 +107,9 @@ private:
 
     ID3D12Device9*             pDevice9          = nullptr;
     ID3D12CommandQueue*        pCommandQueue     = nullptr;
+    ID3D12CommandQueue*        pCopyQueue        = nullptr;
     ID3D12DescriptorHeap*      pRtvHeap          = nullptr;
+    ID3D12DescriptorHeap*      pDsvHeap          = nullptr;
     ID3D12Resource*            pRenderTargets[MAX_FRAMES_IN_FLIGHT] = { nullptr };
     ID3D12CommandAllocator*    pCommandAllocators[MAX_FRAMES_IN_FLIGHT] = { nullptr };
     ID3D12GraphicsCommandList* pCommandList      = nullptr;
@@ -132,7 +134,8 @@ private:
     UINT64                     maxChunkSizes[2]     = { DEFAULT_CHUNK_SIZE, UPLOAD_CHUNK_SIZE };
 
     UINT                       rtvDescriptorSize = 0;
-    D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_0;
+    UINT                       dsvDescriptorSize = 0;
+    D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_2;
     D3D12_VIEWPORT             viewport;
     D3D12_RECT                 scissorRect;
 
@@ -172,14 +175,6 @@ bool Harmony::Init(HINSTANCE inst) {
         CreateCommandLists();
 
         CreateSyncObjects();
-
-        //BeginOnetime
-
-
-        //end onetime
-
-        //etc
-
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -353,26 +348,64 @@ void Harmony::CreateDevice() {
     // Query feature 
     pDevice9->CheckFeatureSupport(D3D12_FEATURE::D3D12_FEATURE_D3D12_OPTIONS, &featureDataOpts, sizeof featureDataOpts);
     if (featureDataOpts.ResourceHeapTier != D3D12_RESOURCE_HEAP_TIER_2) {
-        throw std::runtime_error("Only support resource heap Tier2 device!");
+        std::cout << "Resource heap Tier is not Tier 2!" << std::endl;
+    }
+
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = { D3D_SHADER_MODEL_6_5 };
+
+    if (FAILED(pDevice9->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel)))
+        || (shaderModel.HighestShaderModel < D3D_SHADER_MODEL_6_5)) {
+        throw std::runtime_error("Shader Model 6.5 is not supported!");
+    }
+
+    D3D12_FEATURE_DATA_D3D12_OPTIONS7 features = {};
+
+    if (FAILED(pDevice9->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &features, sizeof(features)))
+        || (features.MeshShaderTier == D3D12_MESH_SHADER_TIER_NOT_SUPPORTED)) {
+        throw std::exception("Mesh Shaders aren't supported!");
     }
 }
 
 void Harmony::CreateCommandQueue() {
     ComPtr<ID3D12CommandQueue> cmdQueue;
 
-    D3D12_COMMAND_QUEUE_DESC desc = {};
-    desc.Type  = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    {
+        D3D12_COMMAND_QUEUE_DESC desc = {
+            .Type     = D3D12_COMMAND_LIST_TYPE_DIRECT,
+            .Priority = 0,
+            .Flags    = D3D12_COMMAND_QUEUE_FLAG_NONE,
+            .NodeMask = 0
+        };
 
-    if (FAILED(pDevice9->CreateCommandQueue(&desc, IID_PPV_ARGS(&cmdQueue)))) {
-        throw std::runtime_error("Could not create command queue");
+        if (FAILED(pDevice9->CreateCommandQueue(&desc, IID_PPV_ARGS(&cmdQueue)))) {
+            throw std::runtime_error("Could not create graphics command queue");
+        }
+
+        pCommandQueue = cmdQueue.Detach();
+
+        delQ.Append([cCommandQueue = pCommandQueue] {
+            cCommandQueue->Release();
+        });
     }
 
-    pCommandQueue = cmdQueue.Detach();
+    {
+        D3D12_COMMAND_QUEUE_DESC desc = {
+            .Type     = D3D12_COMMAND_LIST_TYPE_COPY,
+            .Priority = 0,
+            .Flags    = D3D12_COMMAND_QUEUE_FLAG_NONE,
+            .NodeMask = 0
+        };
 
-    delQ.Append([cCommandQueue = pCommandQueue] {
-        cCommandQueue->Release();
-    });
+        if (FAILED(pDevice9->CreateCommandQueue(&desc, IID_PPV_ARGS(&cmdQueue)))) {
+            throw std::runtime_error("Could not create copy command queue");
+        }
+
+        pCopyQueue = cmdQueue.Detach();
+
+        delQ.Append([cCommandQueue = pCommandQueue] {
+            cCommandQueue->Release();
+        });
+    }
 }
 
 void Harmony::CreateSwapChain() {
@@ -416,22 +449,43 @@ void Harmony::CreateSwapChain() {
 void Harmony::CreateHeaps() {
     ComPtr<ID3D12DescriptorHeap> descriptorHeap;
 
-    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {
-        .Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-        .NumDescriptors = MAX_FRAMES_IN_FLIGHT,
-        .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE
-    };
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {
+            .Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+            .NumDescriptors = MAX_FRAMES_IN_FLIGHT,
+            .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE
+        };
 
-    if (FAILED(pDevice9->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
-        throw std::runtime_error("Could not create RTV heap!");
+        if (FAILED(pDevice9->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
+            throw std::runtime_error("Could not create RTV heap!");
+        }
+
+        rtvDescriptorSize = pDevice9->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        pRtvHeap = descriptorHeap.Detach();
+
+        delQ.Append([cHeap = pRtvHeap] {
+            cHeap->Release();
+        });
     }
 
-    rtvDescriptorSize = pDevice9->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    pRtvHeap = descriptorHeap.Detach();
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {
+            .Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+            .NumDescriptors = 1,
+            .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE
+        };
 
-    delQ.Append([cHeap = pRtvHeap] {
-        cHeap->Release();
-    });
+        if (FAILED(pDevice9->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
+            throw std::runtime_error("Could not create DSV heap!");
+        }
+
+        dsvDescriptorSize = pDevice9->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        pDsvHeap = descriptorHeap.Detach();
+
+        delQ.Append([cHeap = pDsvHeap] {
+            cHeap->Release();
+        });
+    }
 
     auto AllocateHeap = [cDevice = pDevice9](UINT64 chunkSize, D3D12_HEAP_TYPE type) -> ID3D12Heap* {
         D3D12_HEAP_PROPERTIES hProps = cDevice->GetCustomHeapProperties(0, type);
@@ -465,19 +519,6 @@ void Harmony::CreateResourcesAndViews() {
     UINT64 uploadHeapOffset  = 0;
 
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = pRtvHeap->GetCPUDescriptorHandleForHeapStart();
-
-        for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-            if (FAILED(pSwapChain4->GetBuffer(i, IID_PPV_ARGS(&pRenderTargets[i])))) {
-                throw std::runtime_error("Could not Get swap chain buffer!");
-            }
-
-            pDevice9->CreateRenderTargetView(pRenderTargets[i], nullptr, rtvHandle);
-            rtvHandle.ptr += rtvDescriptorSize;
-        }
-    }
-    
-    {
         D3D12_RESOURCE_DESC cbDesc {
             .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
             .Alignment        = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT,
@@ -508,7 +549,7 @@ void Harmony::CreateResourcesAndViews() {
     {
         D3D12_CLEAR_VALUE dsVal {
             .Format = DXGI_FORMAT_D32_FLOAT,
-            .Color = { 0.0f, 0.0f, 0.0f, 0.0f }
+            .Color = { 1.0f, 1.0f, 1.0f, 1.0f }
         };
 
         D3D12_RESOURCE_DESC depthDesc {
@@ -605,6 +646,32 @@ void Harmony::CreateResourcesAndViews() {
         }
 
         defaultHeapOffset += resInfo.SizeInBytes;
+    }
+
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = pRtvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (FAILED(pSwapChain4->GetBuffer(i, IID_PPV_ARGS(&pRenderTargets[i])))) {
+                throw std::runtime_error("Could not Get swap chain buffer!");
+            }
+
+            pDevice9->CreateRenderTargetView(pRenderTargets[i], nullptr, rtvHandle);
+            rtvHandle.ptr += rtvDescriptorSize;
+        }
+    }
+
+    {
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsViewDesc {
+            .Format        = DXGI_FORMAT_D32_FLOAT,
+            .ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D,
+            .Flags         = D3D12_DSV_FLAG_NONE,
+            .Texture2D     = { 0 }
+        };
+
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = pDsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        pDevice9->CreateDepthStencilView(pDepthBuffer, &dsViewDesc, dsvHandle);
     }
 }
 
@@ -863,7 +930,7 @@ void Harmony::PopulateCommandList() {
     pCommandList->SetGraphicsRootSignature(pRootSignature);
 
     D3D12_RESOURCE_BARRIER rtBarrier {
-        .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
         .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
         .Transition = {
             .pResource   = pRenderTargets[frameIndex],
@@ -875,21 +942,38 @@ void Harmony::PopulateCommandList() {
 
     pCommandList->ResourceBarrier(1, &rtBarrier);
 
+    D3D12_RESOURCE_BARRIER dsBarrier {
+        .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition = {
+            .pResource   = pDepthBuffer,
+            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            .StateBefore = D3D12_RESOURCE_STATE_COMMON,
+            .StateAfter  = D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        }
+    };
+
+    pCommandList->ResourceBarrier(1, &dsBarrier);
+
     D3D12_CPU_DESCRIPTOR_HANDLE rtHandle = static_cast<D3D12_CPU_DESCRIPTOR_HANDLE>(pRtvHeap->GetCPUDescriptorHandleForHeapStart().ptr + frameIndex * rtvDescriptorSize);
-    pCommandList->OMSetRenderTargets(1, &rtHandle, FALSE, nullptr);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsHandle = pDsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+    pCommandList->OMSetRenderTargets(1, &rtHandle, FALSE, &dsHandle);
 
     pCommandList->RSSetViewports(1, &viewport);
     pCommandList->RSSetScissorRects(1, &scissorRect);
 
     const float clearColor[] = { 0.5f, 0.2f, 0.0f, 1.0f };
     pCommandList->ClearRenderTargetView(rtHandle, clearColor, 0, nullptr);
+    pCommandList->ClearDepthStencilView(dsHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    
 
+    std::swap(dsBarrier.Transition.StateBefore, dsBarrier.Transition.StateAfter);
+    pCommandList->ResourceBarrier(1, &dsBarrier);
 
     std::swap(rtBarrier.Transition.StateBefore, rtBarrier.Transition.StateAfter);
-
     pCommandList->ResourceBarrier(1, &rtBarrier);
+
     pCommandList->Close();
 }
 
