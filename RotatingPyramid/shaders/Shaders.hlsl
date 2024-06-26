@@ -1,28 +1,31 @@
 struct VsInput
 {
     float3 position : POSITION;
+    float3 color    : COLOR0;
     float2 uv       : TEXCOORD;
 };
 
 struct VsOutput
 {
     float4 position : SV_Position;
+    float3 color    : COLOR0;
     float2 uv       : TEXCOORD;
 };
 
-struct VsConstant0
+struct UniformBuffer0
 {
-    float4x4 mvpMatrix;
+    float4x4 mvp;
 };
 
-ConstantBuffer<VsConstant0> vsCB : register(b0);
+ConstantBuffer<UniformBuffer0> cb0 : register(b0);
 
 VsOutput VsMain(VsInput v)
 {
     VsOutput output;
     
-    output.position = mul(float4(v.position, 1.0f), vsCB.mvpMatrix);
-    output.uv = v.uv;
+    output.position = mul(float4(v.position, 1.0f), cb0.mvp);
+    output.color    = v.color;
+    output.uv       = v.uv;
     
     return output;
 }
@@ -30,7 +33,7 @@ VsOutput VsMain(VsInput v)
 Texture2D<float4> colorTexture : register(t0);
 SamplerState      colorSampler : register(s0);
 
-float4 PsMain(VsOutput vx) : SV_Target
+float4 PsMain(VsOutput vo) : SV_Target
 {
-    return colorTexture.Sample(colorSampler, vx.uv);
+    return float4(vo.color, 1.0f);
 }

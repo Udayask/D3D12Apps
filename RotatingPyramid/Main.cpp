@@ -50,7 +50,33 @@ private:
 struct Vertex
 {
     DirectX::XMFLOAT3 position;
-    DirectX::XMFLOAT4 color;
+    DirectX::XMFLOAT3 color;
+    DirectX::XMFLOAT2 uv;
+};
+
+static Vertex vertices[12] = {
+    {{ 0.5f,  0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+    {{ 0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+
+    {{ 0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+    {{-0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 1.0f}, {0.0f, 0.0f}},
+
+    {{-0.5f,  0.0f,  0.5f}, {0.0f, 1.0f, 1.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},             
+    {{-0.5f,  0.0f, -0.5f}, {1.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+
+    {{-0.5f,  0.0f, -0.5f}, {1.0f, 0.0f, 1.0f}, {0.5f, 0.5f}},
+    {{ 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},             
+    {{ 0.5f,  0.0f, -0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}},
+};
+
+static uint32_t indices[12] = {
+    0,  1,  2,
+    3,  4,  5,
+    6,  7,  8,
+    9, 10, 11
 };
 
 struct UniformBuffer
@@ -90,7 +116,9 @@ private:
     void CreatePipelines();
     void CreateCommandLists();
     void CreateSyncObjects();
+    void DownloadData();
 
+    void UpdateUbo();
     void PopulateCommandList();
     void MoveToNextFrame();
     void WaitForGpu();
@@ -175,6 +203,8 @@ bool Harmony::Init(HINSTANCE inst) {
         CreateCommandLists();
 
         CreateSyncObjects();
+
+        DownloadData();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -521,7 +551,7 @@ void Harmony::CreateResourcesAndViews() {
     {
         D3D12_RESOURCE_DESC cbDesc {
             .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
-            .Alignment        = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Alignment        = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
             .Width            = sizeof(UniformBuffer),
             .Height           = 1,
             .DepthOrArraySize = 1,
@@ -606,7 +636,7 @@ void Harmony::CreateResourcesAndViews() {
         D3D12_RESOURCE_DESC vbDesc {
             .Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER,
             .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Width      = 512,
+            .Width      = sizeof(vertices),
             .Height     = 1,
             .DepthOrArraySize = 1,
             .MipLevels  = 1,
@@ -618,18 +648,18 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &vbDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
-            throw std::runtime_error("Could not create texture!");
+        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
+            throw std::runtime_error("Could not create vertex buffer!");
         }
 
-        defaultHeapOffset += resInfo.SizeInBytes;
+        uploadHeapOffset += resInfo.SizeInBytes;
     }
 
     {
-        D3D12_RESOURCE_DESC ibDesc{
+        D3D12_RESOURCE_DESC ibDesc {
             .Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER,
             .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Width      = 512,
+            .Width      = sizeof(indices),
             .Height     = 1,
             .DepthOrArraySize = 1,
             .MipLevels  = 1,
@@ -641,11 +671,11 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &ibDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
-            throw std::runtime_error("Could not create texture!");
+        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
+            throw std::runtime_error("Could not index buffer!");
         }
 
-        defaultHeapOffset += resInfo.SizeInBytes;
+        uploadHeapOffset += resInfo.SizeInBytes;
     }
 
     {
@@ -696,9 +726,9 @@ void Harmony::CreatePipelines() {
             {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
         };
 
-        rootParams[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        rootParams[0].DescriptorTable.NumDescriptorRanges = 1;
-        rootParams[0].DescriptorTable.pDescriptorRanges   = &descRange[0];
+        rootParams[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        rootParams[0].Descriptor.ShaderRegister           = 0;
+        rootParams[0].Descriptor.RegisterSpace            = 0;
         rootParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_VERTEX;
 
         rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -759,8 +789,9 @@ void Harmony::CreatePipelines() {
         }
 
         D3D12_INPUT_ELEMENT_DESC inputElementDesc[] = {
-            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            { "COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         };
 
         D3D12_BLEND_DESC blendDesc;
@@ -779,8 +810,8 @@ void Harmony::CreatePipelines() {
 
         D3D12_RASTERIZER_DESC rastDesc;
         rastDesc.FillMode              = D3D12_FILL_MODE_SOLID;
-        rastDesc.CullMode              = D3D12_CULL_MODE_BACK;
-        rastDesc.FrontCounterClockwise = FALSE;
+        rastDesc.CullMode              = D3D12_CULL_MODE_NONE;
+        rastDesc.FrontCounterClockwise = TRUE;
         rastDesc.DepthBias             = 0;
         rastDesc.DepthBiasClamp        = 0.0f;
         rastDesc.SlopeScaledDepthBias  = 0.0f;
@@ -815,7 +846,7 @@ void Harmony::CreatePipelines() {
         psoDesc.SampleMask            = D3D12_DEFAULT_SAMPLE_MASK;
         psoDesc.RasterizerState       = rastDesc;
         psoDesc.DepthStencilState     = dsDesc;
-        psoDesc.InputLayout           = { .pInputElementDescs = inputElementDesc, .NumElements = 2 };
+        psoDesc.InputLayout           = { .pInputElementDescs = inputElementDesc, .NumElements = 3 };
         psoDesc.IBStripCutValue       = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets      = 1;
@@ -882,6 +913,34 @@ void Harmony::CreateSyncObjects() {
     });
 }
 
+void Harmony::DownloadData() {
+    void* pData;
+
+    {
+        pData = nullptr;
+
+        if (FAILED(pIndexBuffer->Map(0, 0, &pData)) || pData == nullptr) {
+            throw std::runtime_error("Could not map index buffer!");
+        }
+
+        memcpy_s(pData, sizeof indices, indices, sizeof indices);
+
+        pIndexBuffer->Unmap(0, nullptr);
+    }
+
+    {
+        pData = nullptr;
+
+        if (FAILED(pVertexBuffer->Map(0, 0, &pData)) || pData == nullptr) {
+            throw std::runtime_error("Could not map vertex buffer!");
+        }
+
+        memcpy_s(pData, sizeof vertices, vertices, sizeof vertices);
+
+        pVertexBuffer->Unmap(0, nullptr);
+    }
+}
+
 #pragma endregion
 
 #pragma region Misc
@@ -913,6 +972,7 @@ LRESULT Harmony::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 #pragma region Rendering
 
 void Harmony::Render() {
+    UpdateUbo();
     PopulateCommandList();
 
     ID3D12CommandList* ppCmdLists[] = { pCommandList };
@@ -921,6 +981,35 @@ void Harmony::Render() {
     pSwapChain4->Present(1, 0);
 
     MoveToNextFrame();
+}
+
+void Harmony::UpdateUbo() {
+    using namespace DirectX;
+
+    static auto epoch = std::chrono::high_resolution_clock::now();
+
+    auto current = std::chrono::high_resolution_clock::now();
+    float time   = std::chrono::duration<float, std::chrono::seconds::period>( current - epoch ).count();
+
+    // TODO: make model matrix
+    auto model = XMMatrixRotationY(time * XMConvertToRadians(90.0f));
+
+    XMFLOAT3 eyePosition = { 0.0f,  0.5f, -2.0f };
+    XMFLOAT3 lookAt      = { 0.0f,  0.0f,  1.0f };
+    XMFLOAT3 upVector    = { 0.0f,  1.0f,  0.0f };
+
+    auto view = XMMatrixLookToRH(XMLoadFloat3(&eyePosition), XMLoadFloat3(&lookAt), XMLoadFloat3(&upVector));
+    auto proj = XMMatrixPerspectiveFovRH( XMConvertToRadians(70.0f), float(WINDOW_WIDTH) / WINDOW_HEIGHT, 0.1f, 20.0f );
+
+    void* pData = nullptr;
+    if (FAILED(pConstantBuffers[frameIndex]->Map(0, nullptr, &pData)) || pData == nullptr) {
+        throw std::runtime_error("Could not map CB!");
+    }
+
+    auto mvp = model * view * proj;
+    memcpy_s(pData, sizeof mvp, &mvp, sizeof mvp);
+    
+    pConstantBuffers[frameIndex]->Unmap(0, nullptr);
 }
 
 void Harmony::PopulateCommandList() {
@@ -963,10 +1052,29 @@ void Harmony::PopulateCommandList() {
     pCommandList->RSSetViewports(1, &viewport);
     pCommandList->RSSetScissorRects(1, &scissorRect);
 
-    const float clearColor[] = { 0.5f, 0.2f, 0.0f, 1.0f };
+    const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
     pCommandList->ClearRenderTargetView(rtHandle, clearColor, 0, nullptr);
     pCommandList->ClearDepthStencilView(dsHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
+    pCommandList->SetGraphicsRootConstantBufferView(0, pConstantBuffers[frameIndex]->GetGPUVirtualAddress());
+    pCommandList->IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    D3D12_INDEX_BUFFER_VIEW ibv {
+        pIndexBuffer->GetGPUVirtualAddress(),
+        sizeof indices,
+        DXGI_FORMAT_R32_UINT,
+    };
+
+    D3D12_VERTEX_BUFFER_VIEW vbv{
+        pVertexBuffer->GetGPUVirtualAddress(),
+        sizeof vertices,
+        sizeof Vertex
+    };
+
+    pCommandList->IASetIndexBuffer(&ibv);
+    pCommandList->IASetVertexBuffers(0, 1, &vbv);
+
+    pCommandList->DrawIndexedInstanced(12, 1, 0, 0, 0);
 
     std::swap(dsBarrier.Transition.StateBefore, dsBarrier.Transition.StateAfter);
     pCommandList->ResourceBarrier(1, &dsBarrier);
