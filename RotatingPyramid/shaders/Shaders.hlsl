@@ -23,7 +23,7 @@ VsOutput VsMain(VsInput v)
 {
     VsOutput output;
     
-    output.position = mul(float4(v.position, 1.0f), cb0.mvp);
+    output.position = mul(cb0.mvp, float4(v.position, 1.0f));
     output.color    = v.color;
     output.uv       = v.uv;
     

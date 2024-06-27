@@ -17,11 +17,12 @@
 #include <dxgi1_6.h>
 #include <D3Dcompiler.h>
 #include <DirectXMath.h>
+using namespace DirectX;
 
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;
 
-#define APPLICATION_NAME        "Mesh Render"
+#define APPLICATION_NAME        "Rotating Pyramid"
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
 
@@ -81,11 +82,8 @@ static uint32_t indices[12] = {
 
 struct UniformBuffer
 {
-    DirectX::XMFLOAT4X4 mvp;
-    char padding[192];
+    XMMATRIX mvp;
 };
-
-static_assert(sizeof(UniformBuffer) % 256 == 0);
 
 #pragma region ClassDecl
 
@@ -233,8 +231,6 @@ void Harmony::Run() {
 
 void Harmony::Shutdown() {
     WaitForGpu();
-
-
 
     delQ.Finalize();
 }
@@ -946,22 +942,19 @@ void Harmony::DownloadData() {
 #pragma region Misc
 
 LRESULT Harmony::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    Harmony* pApp = reinterpret_cast<Harmony*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+
     switch (msg) {
     case WM_CLOSE:
     case WM_DESTROY:
-    {
         PostQuitMessage(0);         // close the application entirely
         return 0;
-    };
 
     case WM_SIZE:
-    {
-        Harmony* pApp = reinterpret_cast<Harmony*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
         if (pApp) {
             pApp->Resize();
-            return 0;
         }
-    };
+        return 0;
     }
 
     return DefWindowProc(hWnd, msg, wParam, lParam);
@@ -984,30 +977,32 @@ void Harmony::Render() {
 }
 
 void Harmony::UpdateUbo() {
-    using namespace DirectX;
-
     static auto epoch = std::chrono::high_resolution_clock::now();
 
     auto current = std::chrono::high_resolution_clock::now();
     float time   = std::chrono::duration<float, std::chrono::seconds::period>( current - epoch ).count();
 
-    // TODO: make model matrix
-    auto model = XMMatrixRotationY(time * XMConvertToRadians(90.0f));
+    const XMVECTOR Eye = XMVectorSet( 0.0f,  0.75f, -1.5f, 0.0f );
+    const XMVECTOR At  = XMVectorSet( 0.0f,  0.0f,  0.0f, 0.0f );
+    const XMVECTOR Up  = XMVectorSet( 0.0f,  1.0f,  0.0f, 0.0f );
 
-    XMFLOAT3 eyePosition = { 0.0f,  0.5f, -2.0f };
-    XMFLOAT3 lookAt      = { 0.0f,  0.0f,  1.0f };
-    XMFLOAT3 upVector    = { 0.0f,  1.0f,  0.0f };
+    float yDisplacement = (sin(time * 5) * 0.25f) - 0.25f;
 
-    auto view = XMMatrixLookToRH(XMLoadFloat3(&eyePosition), XMLoadFloat3(&lookAt), XMLoadFloat3(&upVector));
-    auto proj = XMMatrixPerspectiveFovRH( XMConvertToRadians(70.0f), float(WINDOW_WIDTH) / WINDOW_HEIGHT, 0.1f, 20.0f );
+    XMMATRIX  world      = XMMatrixRotationY(time * XMConvertToRadians(90.0f));
+    world *= XMMatrixTranslation(0.0f, yDisplacement, 0.0f);
 
+    XMMATRIX  view       = XMMatrixLookAtLH( Eye, At, Up );
+    XMMATRIX  projection = XMMatrixPerspectiveFovLH(70, WINDOW_WIDTH / float(WINDOW_HEIGHT), 0.1f, 20.0f);
+    
     void* pData = nullptr;
     if (FAILED(pConstantBuffers[frameIndex]->Map(0, nullptr, &pData)) || pData == nullptr) {
         throw std::runtime_error("Could not map CB!");
     }
 
-    auto mvp = model * view * proj;
-    memcpy_s(pData, sizeof mvp, &mvp, sizeof mvp);
+    UniformBuffer ubo;
+    ubo.mvp = world * view * projection;
+
+    memcpy_s(pData, sizeof ubo, &ubo, sizeof ubo);
     
     pConstantBuffers[frameIndex]->Unmap(0, nullptr);
 }
