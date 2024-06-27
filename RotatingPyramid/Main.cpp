@@ -807,7 +807,7 @@ void Harmony::CreatePipelines() {
         D3D12_RASTERIZER_DESC rastDesc;
         rastDesc.FillMode              = D3D12_FILL_MODE_SOLID;
         rastDesc.CullMode              = D3D12_CULL_MODE_BACK;
-        rastDesc.FrontCounterClockwise = TRUE;
+        rastDesc.FrontCounterClockwise = FALSE;
         rastDesc.DepthBias             = 0;
         rastDesc.DepthBiasClamp        = 0.0f;
         rastDesc.SlopeScaledDepthBias  = 0.0f;

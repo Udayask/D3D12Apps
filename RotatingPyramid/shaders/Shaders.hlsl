@@ -14,7 +14,7 @@ struct VsOutput
 
 struct UniformBuffer0
 {
-    float4x4 mvp;
+    matrix mvp;
 };
 
 ConstantBuffer<UniformBuffer0> cb0 : register(b0);
