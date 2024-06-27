@@ -17,6 +17,7 @@
 #include <dxgi1_6.h>
 #include <D3Dcompiler.h>
 #include <DirectXMath.h>
+using namespace DirectX;
 
 #include <wrl.h>
 using Microsoft::WRL::ComPtr;
@@ -81,11 +82,8 @@ static uint32_t indices[12] = {
 
 struct UniformBuffer
 {
-    DirectX::XMFLOAT4X4 mvp;
-    char padding[192];
+    XMMATRIX mvp;
 };
-
-static_assert(sizeof(UniformBuffer) % 256 == 0);
 
 #pragma region ClassDecl
 
@@ -233,8 +231,6 @@ void Harmony::Run() {
 
 void Harmony::Shutdown() {
     WaitForGpu();
-
-
 
     delQ.Finalize();
 }
@@ -522,9 +518,9 @@ void Harmony::CreateHeaps() {
 
         D3D12_HEAP_DESC heapDesc {
             .SizeInBytes = chunkSize,
-            .Properties = {.Type = hProps.Type, .CPUPageProperty = hProps.CPUPageProperty, .MemoryPoolPreference = hProps.MemoryPoolPreference, .CreationNodeMask = hProps.CreationNodeMask , .VisibleNodeMask = hProps.VisibleNodeMask },
+            .Properties = {.Type = type, .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN, .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN, .CreationNodeMask = hProps.CreationNodeMask , .VisibleNodeMask = hProps.VisibleNodeMask },
             .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Flags      = D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES
+            .Flags      = type == D3D12_HEAP_TYPE_DEFAULT ? D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES : D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS
         };
 
         ComPtr<ID3D12Heap> memHeap;
@@ -810,7 +806,7 @@ void Harmony::CreatePipelines() {
 
         D3D12_RASTERIZER_DESC rastDesc;
         rastDesc.FillMode              = D3D12_FILL_MODE_SOLID;
-        rastDesc.CullMode              = D3D12_CULL_MODE_NONE;
+        rastDesc.CullMode              = D3D12_CULL_MODE_BACK;
         rastDesc.FrontCounterClockwise = TRUE;
         rastDesc.DepthBias             = 0;
         rastDesc.DepthBiasClamp        = 0.0f;
@@ -991,22 +987,21 @@ void Harmony::UpdateUbo() {
     auto current = std::chrono::high_resolution_clock::now();
     float time   = std::chrono::duration<float, std::chrono::seconds::period>( current - epoch ).count();
 
-    // TODO: make model matrix
     auto model = XMMatrixRotationY(time * XMConvertToRadians(90.0f));
 
-    XMFLOAT3 eyePosition = { 0.0f,  0.5f, -2.0f };
-    XMFLOAT3 lookAt      = { 0.0f,  0.0f,  1.0f };
-    XMFLOAT3 upVector    = { 0.0f,  1.0f,  0.0f };
+    XMFLOAT3 eyePosition  = { 0.0f,  0.5f, -1.0f };
+    XMFLOAT3 lookAt       = { 0.0f,  0.0f,   0.0f };
+    XMFLOAT3 upVector     = { 0.0f,  1.0f,   0.0f };
 
-    auto view = XMMatrixLookToRH(XMLoadFloat3(&eyePosition), XMLoadFloat3(&lookAt), XMLoadFloat3(&upVector));
-    auto proj = XMMatrixPerspectiveFovRH( XMConvertToRadians(70.0f), float(WINDOW_WIDTH) / WINDOW_HEIGHT, 0.1f, 20.0f );
+    XMMATRIX view = XMMatrixLookAtLH(XMLoadFloat3(&eyePosition), XMLoadFloat3(&lookAt), XMLoadFloat3(&upVector));
+    XMMATRIX proj = XMMatrixPerspectiveFovLH( XMConvertToRadians(90.0f), float(WINDOW_WIDTH) / WINDOW_HEIGHT, 0.1f, 20.0f );
 
     void* pData = nullptr;
     if (FAILED(pConstantBuffers[frameIndex]->Map(0, nullptr, &pData)) || pData == nullptr) {
         throw std::runtime_error("Could not map CB!");
     }
 
-    auto mvp = model * view * proj;
+    auto mvp = proj * view * model;
     memcpy_s(pData, sizeof mvp, &mvp, sizeof mvp);
     
     pConstantBuffers[frameIndex]->Unmap(0, nullptr);
