@@ -518,9 +518,9 @@ void Harmony::CreateHeaps() {
 
         D3D12_HEAP_DESC heapDesc {
             .SizeInBytes = chunkSize,
-            .Properties = {.Type = hProps.Type, .CPUPageProperty = hProps.CPUPageProperty, .MemoryPoolPreference = hProps.MemoryPoolPreference, .CreationNodeMask = hProps.CreationNodeMask , .VisibleNodeMask = hProps.VisibleNodeMask },
+            .Properties = {.Type = type, .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN, .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN, .CreationNodeMask = hProps.CreationNodeMask , .VisibleNodeMask = hProps.VisibleNodeMask },
             .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Flags      = D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES
+            .Flags      = type == D3D12_HEAP_TYPE_DEFAULT ? D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES : D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS
         };
 
         ComPtr<ID3D12Heap> memHeap;
@@ -806,7 +806,7 @@ void Harmony::CreatePipelines() {
 
         D3D12_RASTERIZER_DESC rastDesc;
         rastDesc.FillMode              = D3D12_FILL_MODE_SOLID;
-        rastDesc.CullMode              = D3D12_CULL_MODE_NONE;
+        rastDesc.CullMode              = D3D12_CULL_MODE_BACK;
         rastDesc.FrontCounterClockwise = TRUE;
         rastDesc.DepthBias             = 0;
         rastDesc.DepthBiasClamp        = 0.0f;
