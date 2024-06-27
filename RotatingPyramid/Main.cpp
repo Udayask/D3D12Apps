@@ -83,7 +83,10 @@ static uint32_t indices[12] = {
 struct UniformBuffer
 {
     XMMATRIX mvp;
+    char     pad[192];
 };
+
+static_assert(sizeof(UniformBuffer) == 256);
 
 #pragma region ClassDecl
 
@@ -145,7 +148,7 @@ private:
     ID3D12RootSignature*       pRootSignature    = nullptr;
     ID3D12PipelineState*       pPipelineState    = nullptr;
 
-    ID3D12Resource*            pConstantBuffers[MAX_FRAMES_IN_FLIGHT] = { nullptr };
+    ID3D12Resource*            pConstantBuffer   = nullptr;
     ID3D12Resource*            pDepthBuffer      = nullptr;
     ID3D12Resource*            pTexture          = nullptr;
     ID3D12Resource*            pVertexBuffer     = nullptr;
@@ -548,7 +551,7 @@ void Harmony::CreateResourcesAndViews() {
         D3D12_RESOURCE_DESC cbDesc {
             .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
             .Alignment        = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Width            = sizeof(UniformBuffer),
+            .Width            = sizeof(UniformBuffer) * MAX_FRAMES_IN_FLIGHT,
             .Height           = 1,
             .DepthOrArraySize = 1,
             .MipLevels        = 1,
@@ -563,13 +566,11 @@ void Harmony::CreateResourcesAndViews() {
             cbDesc.Alignment = resInfo.Alignment;
         }
 
-        for (UINT i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-            if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &cbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pConstantBuffers[i])))) {
-                throw std::runtime_error("Could not create constant buffer!");
-            }
-            
-            uploadHeapOffset += resInfo.Alignment;
+        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &cbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pConstantBuffer)))) {
+            throw std::runtime_error("Could not create constant buffer!");
         }
+            
+        uploadHeapOffset += resInfo.Alignment;
     }
     
     {
@@ -995,16 +996,18 @@ void Harmony::UpdateUbo() {
     XMMATRIX  projection = XMMatrixPerspectiveFovLH(70, WINDOW_WIDTH / float(WINDOW_HEIGHT), 0.1f, 20.0f);
     
     void* pData = nullptr;
-    if (FAILED(pConstantBuffers[frameIndex]->Map(0, nullptr, &pData)) || pData == nullptr) {
+    if (FAILED(pConstantBuffer->Map(0, nullptr, &pData)) || pData == nullptr) {
         throw std::runtime_error("Could not map CB!");
     }
 
     UniformBuffer ubo;
     ubo.mvp = world * view * projection;
 
-    memcpy_s(pData, sizeof ubo, &ubo, sizeof ubo);
+    uint8_t* pBytePtr = ((uint8_t*)pData) + frameIndex * sizeof(UniformBuffer);
+
+    memcpy_s(pBytePtr, sizeof(XMMATRIX), &ubo.mvp, sizeof(XMMATRIX));
     
-    pConstantBuffers[frameIndex]->Unmap(0, nullptr);
+    pConstantBuffer->Unmap(0, nullptr);
 }
 
 void Harmony::PopulateCommandList() {
@@ -1051,7 +1054,7 @@ void Harmony::PopulateCommandList() {
     pCommandList->ClearRenderTargetView(rtHandle, clearColor, 0, nullptr);
     pCommandList->ClearDepthStencilView(dsHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    pCommandList->SetGraphicsRootConstantBufferView(0, pConstantBuffers[frameIndex]->GetGPUVirtualAddress());
+    pCommandList->SetGraphicsRootConstantBufferView(0, pConstantBuffer->GetGPUVirtualAddress() + frameIndex * sizeof(UniformBuffer) );
     pCommandList->IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     D3D12_INDEX_BUFFER_VIEW ibv {
