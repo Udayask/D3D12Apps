@@ -35,5 +35,6 @@ SamplerState      colorSampler : register(s0);
 
 float4 PsMain(VsOutput vo) : SV_Target
 {
-    return float4(vo.color, 1.0f);
+    float4 tex = colorTexture.Sample(colorSampler, vo.uv);
+    return tex + float4(vo.color, 1.0f);
 }

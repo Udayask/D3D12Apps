@@ -26,6 +26,9 @@ using Microsoft::WRL::ComPtr;
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
 
+#define TEXTURE_WIDTH           512
+#define TEXTURE_HEIGHT          512
+
 class DeletionQueue {
 public:
     using Fn    = std::function<void()>;
@@ -139,6 +142,8 @@ private:
     ID3D12CommandQueue*        pCopyQueue        = nullptr;
     ID3D12DescriptorHeap*      pRtvHeap          = nullptr;
     ID3D12DescriptorHeap*      pDsvHeap          = nullptr;
+    ID3D12DescriptorHeap*      pSrvHeap          = nullptr;
+    ID3D12DescriptorHeap*      pSmpHeap          = nullptr;
     ID3D12Resource*            pRenderTargets[MAX_FRAMES_IN_FLIGHT] = { nullptr };
     ID3D12CommandAllocator*    pCommandAllocators[MAX_FRAMES_IN_FLIGHT] = { nullptr };
     ID3D12GraphicsCommandList* pCommandList      = nullptr;
@@ -164,6 +169,9 @@ private:
 
     UINT                       rtvDescriptorSize = 0;
     UINT                       dsvDescriptorSize = 0;
+    UINT                       srvDescriptorSize = 0;
+    UINT                       smpDescriptorSize = 0;
+
     D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_2;
     D3D12_VIEWPORT             viewport;
     D3D12_RECT                 scissorRect;
@@ -480,9 +488,9 @@ void Harmony::CreateHeaps() {
 
     {
         D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {
-            .Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+            .Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
             .NumDescriptors = MAX_FRAMES_IN_FLIGHT,
-            .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE
+            .Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE
         };
 
         if (FAILED(pDevice9->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
@@ -499,9 +507,9 @@ void Harmony::CreateHeaps() {
 
     {
         D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {
-            .Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+            .Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
             .NumDescriptors = 1,
-            .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE
+            .Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE
         };
 
         if (FAILED(pDevice9->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
@@ -512,6 +520,44 @@ void Harmony::CreateHeaps() {
         pDsvHeap = descriptorHeap.Detach();
 
         delQ.Append([cHeap = pDsvHeap] {
+            cHeap->Release();
+        });
+    }
+
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc {
+            .Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+            .NumDescriptors = 8,
+            .Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+        };
+
+        if (FAILED(pDevice9->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
+            throw std::runtime_error("Could not create CBV_SRV_UAV heap!");
+        }
+
+        srvDescriptorSize = pDevice9->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        pSrvHeap = descriptorHeap.Detach();
+
+        delQ.Append([cHeap = pSrvHeap] {
+            cHeap->Release();
+        });
+    }
+
+    {
+        D3D12_DESCRIPTOR_HEAP_DESC smpHeapDesc {
+            .Type           = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+            .NumDescriptors = 8,
+            .Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+        };
+
+        if (FAILED(pDevice9->CreateDescriptorHeap(&smpHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
+            throw std::runtime_error("Could not create CBV_SRV_UAV heap!");
+        }
+
+        smpDescriptorSize = pDevice9->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        pSmpHeap = descriptorHeap.Detach();
+
+        delQ.Append([cHeap = pSmpHeap] {
             cHeap->Release();
         });
     }
@@ -610,10 +656,10 @@ void Harmony::CreateResourcesAndViews() {
         D3D12_RESOURCE_DESC texDesc {
             .Dimension  = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
             .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Width      = 512,
-            .Height     = 512,
+            .Width      = TEXTURE_WIDTH,
+            .Height     = TEXTURE_HEIGHT,
             .DepthOrArraySize = 1,
-            .MipLevels  = 9,
+            .MipLevels  = static_cast<UINT16>(log2(TEXTURE_HEIGHT)),
             .Format     = DXGI_FORMAT_R8G8B8A8_UNORM,
             .SampleDesc = {.Count = 1, .Quality = 0 },
             .Layout     = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
@@ -627,6 +673,35 @@ void Harmony::CreateResourcesAndViews() {
         }
 
         defaultHeapOffset += resInfo.SizeInBytes;
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc {
+            .Format                  = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D,
+            .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            .Texture2D = {
+                .MostDetailedMip     = 0,
+                .MipLevels           = texDesc.MipLevels,
+                .PlaneSlice          = 0,
+                .ResourceMinLODClamp = 0.0f
+            }
+        };
+
+        pDevice9->CreateShaderResourceView(pTexture, &srvDesc, pSrvHeap->GetCPUDescriptorHandleForHeapStart());
+
+        D3D12_SAMPLER_DESC smpDesc {
+            .Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+            .AddressU       = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            .AddressV       = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            .AddressW       = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            .MipLODBias     = 0.0f,
+            .MaxAnisotropy  = 0,
+            .ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER,
+            .BorderColor    = { 0.0f, 0.0f, 0.0f, 0.0f },
+            .MinLOD         = 0.0f,
+            .MaxLOD         = 0.0f 
+        };
+
+        pDevice9->CreateSampler(&smpDesc, pSmpHeap->GetCPUDescriptorHandleForHeapStart());
     }
 
     {
@@ -1054,7 +1129,7 @@ void Harmony::PopulateCommandList() {
     pCommandList->ClearRenderTargetView(rtHandle, clearColor, 0, nullptr);
     pCommandList->ClearDepthStencilView(dsHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
-    pCommandList->SetGraphicsRootConstantBufferView(0, pConstantBuffer->GetGPUVirtualAddress() + frameIndex * sizeof(UniformBuffer) );
+    
     pCommandList->IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     D3D12_INDEX_BUFFER_VIEW ibv {
@@ -1071,6 +1146,14 @@ void Harmony::PopulateCommandList() {
 
     pCommandList->IASetIndexBuffer(&ibv);
     pCommandList->IASetVertexBuffers(0, 1, &vbv);
+
+    ID3D12DescriptorHeap* pDescHeaps[2] = { pSrvHeap, pSmpHeap };
+
+    pCommandList->SetDescriptorHeaps(2, pDescHeaps);
+
+    pCommandList->SetGraphicsRootConstantBufferView(0, pConstantBuffer->GetGPUVirtualAddress() + frameIndex * sizeof(UniformBuffer) );
+    pCommandList->SetGraphicsRootDescriptorTable(1, pSrvHeap->GetGPUDescriptorHandleForHeapStart());
+    pCommandList->SetGraphicsRootDescriptorTable(2, pSmpHeap->GetGPUDescriptorHandleForHeapStart());
 
     pCommandList->DrawIndexedInstanced(12, 1, 0, 0, 0);
 
