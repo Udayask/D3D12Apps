@@ -26,8 +26,8 @@ using Microsoft::WRL::ComPtr;
 #define WINDOW_WIDTH            1920
 #define WINDOW_HEIGHT           1080
 
-#define TEXTURE_WIDTH           512
-#define TEXTURE_HEIGHT          512
+#define TEXTURE_WIDTH           1024
+#define TEXTURE_HEIGHT          1024
 
 class DeletionQueue {
 public:
@@ -91,6 +91,13 @@ struct UniformBuffer
 
 static_assert(sizeof(UniformBuffer) == 256);
 
+inline void WaitForFence (ID3D12Fence* fence, UINT64 completionValue, HANDLE waitEvent) {
+    if (fence->GetCompletedValue() < completionValue) {
+        fence->SetEventOnCompletion (completionValue, waitEvent);
+        WaitForSingleObject (waitEvent, INFINITE);
+    }
+}
+
 #pragma region ClassDecl
 
 class alignas(64) Harmony
@@ -148,7 +155,7 @@ private:
     ID3D12CommandAllocator*    pCommandAllocators[MAX_FRAMES_IN_FLIGHT] = { nullptr };
     ID3D12GraphicsCommandList* pCommandList      = nullptr;
     ID3D12Fence*               pFence            = nullptr;
-    ID3D12Heap*                pHeaps[2]         = { nullptr }; // 0 is default, 1 is upload
+    ID3D12Heap*                pHeap             = nullptr;
 
     ID3D12RootSignature*       pRootSignature    = nullptr;
     ID3D12PipelineState*       pPipelineState    = nullptr;
@@ -158,6 +165,7 @@ private:
     ID3D12Resource*            pTexture          = nullptr;
     ID3D12Resource*            pVertexBuffer     = nullptr;
     ID3D12Resource*            pIndexBuffer      = nullptr;
+    ID3D12Resource*            pUploadBuffer     = nullptr;
 
     HINSTANCE                  hInstance         = NULL;
     HWND                       hMainWindow       = NULL;
@@ -569,7 +577,7 @@ void Harmony::CreateHeaps() {
             .SizeInBytes = chunkSize,
             .Properties = {.Type = type, .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN, .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN, .CreationNodeMask = hProps.CreationNodeMask , .VisibleNodeMask = hProps.VisibleNodeMask },
             .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Flags      = type == D3D12_HEAP_TYPE_DEFAULT ? D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES : D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS
+            .Flags      = D3D12_HEAP_FLAG_NONE
         };
 
         ComPtr<ID3D12Heap> memHeap;
@@ -580,18 +588,15 @@ void Harmony::CreateHeaps() {
         return memHeap.Detach();
     };
 
-    pHeaps[0] = AllocateHeap(DEFAULT_CHUNK_SIZE, D3D12_HEAP_TYPE_DEFAULT);
-    pHeaps[1] = AllocateHeap(UPLOAD_CHUNK_SIZE, D3D12_HEAP_TYPE_UPLOAD);
-
-    delQ.Append([cHeaps = pHeaps] {
-        cHeaps[1]->Release();
-        cHeaps[0]->Release();
+    pHeap = AllocateHeap(DEFAULT_CHUNK_SIZE, D3D12_HEAP_TYPE_DEFAULT);
+    
+    delQ.Append([cHeap = pHeap] {
+        cHeap->Release();
     });
 }
 
 void Harmony::CreateResourcesAndViews() {
     UINT64 defaultHeapOffset = 0;
-    UINT64 uploadHeapOffset  = 0;
 
     {
         D3D12_RESOURCE_DESC cbDesc {
@@ -607,16 +612,26 @@ void Harmony::CreateResourcesAndViews() {
             .Flags            = D3D12_RESOURCE_FLAG_NONE,
         };
 
+        D3D12_HEAP_PROPERTIES uploadHeapProps {
+            .Type                   = D3D12_HEAP_TYPE_UPLOAD,
+            .CPUPageProperty        = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            .MemoryPoolPreference   = D3D12_MEMORY_POOL_UNKNOWN,
+            .CreationNodeMask       = 0,
+            .VisibleNodeMask        = 0
+        };
+
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &cbDesc);
         if (resInfo.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
             cbDesc.Alignment = resInfo.Alignment;
         }
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &cbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pConstantBuffer)))) {
+        if (FAILED(pDevice9->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &cbDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&pConstantBuffer)))) {
             throw std::runtime_error("Could not create constant buffer!");
         }
-            
-        uploadHeapOffset += resInfo.Alignment;
+
+        delQ.Append([cbuff = pConstantBuffer] {
+            cbuff->Release();
+        });
     }
     
     {
@@ -640,54 +655,64 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &depthDesc);
         
-        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &depthDesc, D3D12_RESOURCE_STATE_COMMON, &dsVal, IID_PPV_ARGS(&pDepthBuffer)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &depthDesc, D3D12_RESOURCE_STATE_COMMON, &dsVal, IID_PPV_ARGS(&pDepthBuffer)))) {
             throw std::runtime_error("Could not create depth buffer!");
         }
 
         defaultHeapOffset += resInfo.SizeInBytes;
+
+        delQ.Append([cbuff = pDepthBuffer] {
+            cbuff->Release();
+        });
     }
 
     {
-        D3D12_CLEAR_VALUE texVal {
+        D3D12_CLEAR_VALUE texVal{
             .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
             .Color = { 0.0f, 0.0f, 0.0f, 0.0f }
         };
 
-        D3D12_RESOURCE_DESC texDesc {
-            .Dimension  = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-            .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Width      = TEXTURE_WIDTH,
-            .Height     = TEXTURE_HEIGHT,
+        D3D12_RESOURCE_DESC texDesc{
+            .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            .Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width = TEXTURE_WIDTH,
+            .Height = TEXTURE_HEIGHT,
             .DepthOrArraySize = 1,
-            .MipLevels  = static_cast<UINT16>(log2(TEXTURE_HEIGHT)),
-            .Format     = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .MipLevels = static_cast<UINT16>(log2(TEXTURE_HEIGHT) + 1),
+            .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
             .SampleDesc = {.Count = 1, .Quality = 0 },
-            .Layout     = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
-            .Flags      = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+            .Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
+            .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
         };
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &texDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[0], defaultHeapOffset, &texDesc, D3D12_RESOURCE_STATE_COMMON, &texVal, IID_PPV_ARGS(&pTexture)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &texDesc, D3D12_RESOURCE_STATE_COMMON, &texVal, IID_PPV_ARGS(&pTexture)))) {
             throw std::runtime_error("Could not create texture!");
         }
 
         defaultHeapOffset += resInfo.SizeInBytes;
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc {
-            .Format                  = DXGI_FORMAT_R8G8B8A8_UNORM,
-            .ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D,
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{
+            .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
             .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             .Texture2D = {
-                .MostDetailedMip     = 0,
-                .MipLevels           = texDesc.MipLevels,
-                .PlaneSlice          = 0,
+                .MostDetailedMip = 0,
+                .MipLevels = texDesc.MipLevels,
+                .PlaneSlice = 0,
                 .ResourceMinLODClamp = 0.0f
             }
         };
 
         pDevice9->CreateShaderResourceView(pTexture, &srvDesc, pSrvHeap->GetCPUDescriptorHandleForHeapStart());
 
+        delQ.Append([ctex = pTexture] {
+            ctex->Release();
+        });
+    }
+
+    {
         D3D12_SAMPLER_DESC smpDesc {
             .Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR,
             .AddressU       = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
@@ -720,11 +745,15 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &vbDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
             throw std::runtime_error("Could not create vertex buffer!");
         }
 
-        uploadHeapOffset += resInfo.SizeInBytes;
+        defaultHeapOffset += resInfo.SizeInBytes;
+
+        delQ.Append([cbuff = pVertexBuffer] {
+            cbuff->Release();
+        });
     }
 
     {
@@ -743,11 +772,15 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &ibDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeaps[1], uploadHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
-            throw std::runtime_error("Could not index buffer!");
+        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
+            throw std::runtime_error("Could not create index buffer!");
         }
 
-        uploadHeapOffset += resInfo.SizeInBytes;
+        defaultHeapOffset += resInfo.SizeInBytes;
+
+        delQ.Append([cbuff = pIndexBuffer] {
+            cbuff->Release();
+        });
     }
 
     {
@@ -986,31 +1019,94 @@ void Harmony::CreateSyncObjects() {
 }
 
 void Harmony::DownloadData() {
-    void* pData;
+    ComPtr<ID3D12GraphicsCommandList>   uploadCommandList;
+    ComPtr<ID3D12CommandAllocator>      uploadCommandAllocator;
+    ComPtr<ID3D12Fence>                 uploadFence;
 
-    {
-        pData = nullptr;
+    HRESULT hr;
+    void*   pData = nullptr;
 
-        if (FAILED(pIndexBuffer->Map(0, 0, &pData)) || pData == nullptr) {
-            throw std::runtime_error("Could not map index buffer!");
-        }
-
-        memcpy_s(pData, sizeof indices, indices, sizeof indices);
-
-        pIndexBuffer->Unmap(0, nullptr);
+    hr = pDevice9->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS (&uploadFence));
+    if (FAILED(hr)) {
+        throw std::runtime_error("Could not create fence!");
+    }
+    
+    hr = pDevice9->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS (&uploadCommandAllocator));
+    if (FAILED(hr)) {
+        throw std::runtime_error("Could not create command allocator!");
     }
 
-    {
-        pData = nullptr;
-
-        if (FAILED(pVertexBuffer->Map(0, 0, &pData)) || pData == nullptr) {
-            throw std::runtime_error("Could not map vertex buffer!");
-        }
-
-        memcpy_s(pData, sizeof vertices, vertices, sizeof vertices);
-
-        pVertexBuffer->Unmap(0, nullptr);
+    hr = pDevice9->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, uploadCommandAllocator.Get (), nullptr, IID_PPV_ARGS (&uploadCommandList));
+    if (FAILED(hr)) {
+        throw std::runtime_error("Could not create command list!");
     }
+
+    HANDLE uploadWaitEvent = CreateEvent (nullptr, FALSE, FALSE, nullptr);
+    if (uploadWaitEvent == NULL) {
+        throw std::runtime_error("Could not create event!");
+    }
+
+    D3D12_RESOURCE_DESC texDesc = pTexture->GetDesc();
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT psrFootPrint{ 0 };
+    UINT64  rowSizeInBytes = 0, totalBytes = 0;
+    UINT    numRows = 0;
+    
+    pDevice9->GetCopyableFootprints(&texDesc, 0, 1, 0, &psrFootPrint, &numRows, &rowSizeInBytes, &totalBytes);
+
+    D3D12_RESOURCE_DESC bufferDesc {
+        .Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+        .Width      = sizeof vertices + sizeof indices + totalBytes,
+        .Height     = 1,
+        .DepthOrArraySize = 1,
+        .MipLevels  = 1,
+        .Format     = DXGI_FORMAT_UNKNOWN,
+        .SampleDesc = { 1, 0 },
+        .Layout     = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Flags      = D3D12_RESOURCE_FLAG_NONE
+    };
+
+    D3D12_HEAP_PROPERTIES uploadHeapProps {
+        .Type                   = D3D12_HEAP_TYPE_UPLOAD,
+        .CPUPageProperty        = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference   = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask       = 0,
+        .VisibleNodeMask        = 0
+    };
+
+    hr = pDevice9->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&pUploadBuffer));
+    if (FAILED(hr)) {
+        throw std::runtime_error("Could not create upload buffer!");
+    }
+
+    if (FAILED(pUploadBuffer->Map(0, 0, &pData)) || pData == nullptr) {
+        throw std::runtime_error("Could not map upload buffer!");
+    }
+
+    memcpy_s(pData, sizeof vertices, vertices, sizeof vertices);
+
+    memcpy_s(static_cast<char*>(pData) + sizeof vertices, sizeof indices, indices, sizeof indices);
+    
+    //TODO: copy texture data into upload buffer
+
+    pUploadBuffer->Unmap(0, nullptr);
+    
+    // copy all
+    uploadCommandList->CopyBufferRegion(pVertexBuffer, 0, pUploadBuffer, 0, sizeof vertices);
+    uploadCommandList->CopyBufferRegion(pIndexBuffer, 0, pUploadBuffer, sizeof vertices, sizeof indices);
+    
+    //TODO: copy texture to GPU
+
+    uploadCommandList->Close();
+
+    ID3D12CommandList* commandLists[] = { uploadCommandList.Get() };
+    pCommandQueue->ExecuteCommandLists(1, commandLists);
+    pCommandQueue->Signal(uploadFence.Get(), 1);
+
+    WaitForFence(uploadFence.Get(), 1, uploadWaitEvent);
+    uploadCommandAllocator->Reset();
+    CloseHandle(uploadWaitEvent);
 }
 
 #pragma endregion
