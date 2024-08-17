@@ -1116,13 +1116,13 @@ void Harmony::DownloadData() {
             UINT* pRow = reinterpret_cast<UINT*>(px) + (i * TEXTURE_WIDTH);
 
             for (UINT j = 0; j < TEXTURE_HEIGHT; ++j) {
-                if (((j / 128) % 2) == 0)
+                if (((j / 96) % 2) == 0)
                 {
-                    pRow[j] = (((i / 128) % 2) == 0) ? 0xFFFFFFFF : 0x0;
+                    pRow[j] = (((i / 96) % 2) == 0) ? 0x0F0F0FFF : 0x0;
                 }
                 else
                 {
-                    pRow[j] = (((i / 128) % 2) == 0) ? 0x0 : 0xFFFFFFFF;
+                    pRow[j] = (((i / 96) % 2) == 0) ? 0x0 : 0x0F0F0FFF;
                 }
             }
         }
