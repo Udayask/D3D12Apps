@@ -98,6 +98,16 @@ inline void WaitForFence (ID3D12Fence* fence, UINT64 completionValue, HANDLE wai
     }
 }
 
+inline UINT Align(UINT val, UINT alignment) {
+    UINT misalign = val % alignment;
+
+    if (misalign != 0) {
+        val += (alignment - misalign);
+    }
+
+    return val;
+}
+
 #pragma region ClassDecl
 
 class alignas(64) Harmony
@@ -105,7 +115,6 @@ class alignas(64) Harmony
 public:
     static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
     static constexpr uint32_t DEFAULT_CHUNK_SIZE   = 128 * 1024 * 1024;
-    static constexpr uint32_t UPLOAD_CHUNK_SIZE    = 64 * 1024 * 1024;
 
     bool Init(HINSTANCE inst);
     void Run();
@@ -173,7 +182,6 @@ private:
     UINT                       frameIndex        = 0;
     HANDLE                     fenceHandle       = NULL;
     UINT64                     fenceValues[MAX_FRAMES_IN_FLIGHT] = { 0 };
-    UINT64                     maxChunkSizes[2]     = { DEFAULT_CHUNK_SIZE, UPLOAD_CHUNK_SIZE };
 
     UINT                       rtvDescriptorSize = 0;
     UINT                       dsvDescriptorSize = 0;
@@ -372,9 +380,6 @@ void Harmony::CreateAdapter() {
     std::wcout << "     Video  Mem: " << GetSizeInMB(adDesc.DedicatedVideoMemory)  << "MB" << std::endl;
     std::wcout << "     System Mem: " << GetSizeInMB(adDesc.DedicatedSystemMemory) << "MB" << std::endl;
     std::wcout << "     Shared Mem: " << GetSizeInMB(adDesc.SharedSystemMemory)    << "MB" << std::endl;
-
-    maxChunkSizes[0] = (adDesc.DedicatedVideoMemory ? adDesc.DedicatedVideoMemory : adDesc.DedicatedSystemMemory) / 2;
-    maxChunkSizes[1] = (adDesc.SharedSystemMemory) / 2;
 }
 
 void Harmony::CreateDevice() {
@@ -687,7 +692,7 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &texDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &texDesc, D3D12_RESOURCE_STATE_COMMON, &texVal, IID_PPV_ARGS(&pTexture)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &texDesc, D3D12_RESOURCE_STATE_COPY_DEST, &texVal, IID_PPV_ARGS(&pTexture)))) {
             throw std::runtime_error("Could not create texture!");
         }
 
@@ -745,7 +750,7 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &vbDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
             throw std::runtime_error("Could not create vertex buffer!");
         }
 
@@ -772,7 +777,7 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &ibDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
             throw std::runtime_error("Could not create index buffer!");
         }
 
@@ -1046,18 +1051,31 @@ void Harmony::DownloadData() {
         throw std::runtime_error("Could not create event!");
     }
 
-    D3D12_RESOURCE_DESC texDesc = pTexture->GetDesc();
+    UINT   rowPitch     = Align(TEXTURE_WIDTH * sizeof(uint32_t), D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+    UINT64 textureBytes = rowPitch * TEXTURE_HEIGHT;
 
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT psrFootPrint{ 0 };
-    UINT64  rowSizeInBytes = 0, totalBytes = 0;
-    UINT    numRows = 0;
-    
-    pDevice9->GetCopyableFootprints(&texDesc, 0, 1, 0, &psrFootPrint, &numRows, &rowSizeInBytes, &totalBytes);
+    UINT   meshSize     = sizeof vertices + sizeof indices;
+    UINT64 textureBase  = Align(meshSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+
+    UINT64 totalBytes   = textureBase + textureBytes;
+
+    D3D12_SUBRESOURCE_FOOTPRINT subresFP {
+        .Format   = DXGI_FORMAT_R8G8B8A8_UNORM,
+        .Width    = TEXTURE_WIDTH,
+        .Height   = TEXTURE_HEIGHT,
+        .Depth    = 1,
+        .RowPitch = rowPitch
+    };
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT placedSFP{
+        .Offset    = textureBase,
+        .Footprint = subresFP
+    };
 
     D3D12_RESOURCE_DESC bufferDesc {
         .Dimension  = D3D12_RESOURCE_DIMENSION_BUFFER,
         .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-        .Width      = sizeof vertices + sizeof indices + totalBytes,
+        .Width      = totalBytes,
         .Height     = 1,
         .DepthOrArraySize = 1,
         .MipLevels  = 1,
@@ -1084,19 +1102,89 @@ void Harmony::DownloadData() {
         throw std::runtime_error("Could not map upload buffer!");
     }
 
-    memcpy_s(pData, sizeof vertices, vertices, sizeof vertices);
+    char* px = reinterpret_cast<char*>(pData);
 
-    memcpy_s(static_cast<char*>(pData) + sizeof vertices, sizeof indices, indices, sizeof indices);
+    memcpy_s(px, sizeof vertices, vertices, sizeof vertices);
+    px += sizeof vertices;
+
+    memcpy_s(px, sizeof indices, indices, sizeof indices);
     
-    //TODO: copy texture data into upload buffer
+    {
+        px = reinterpret_cast<char*>(pData) + textureBase;
+
+        for (UINT i = 0; i < TEXTURE_HEIGHT; ++i) {
+            UINT* pRow = reinterpret_cast<UINT*>(px) + (i * TEXTURE_WIDTH);
+
+            for (UINT j = 0; j < TEXTURE_HEIGHT; ++j) {
+                if (((j / 128) % 2) == 0)
+                {
+                    pRow[j] = (((i / 128) % 2) == 0) ? 0xFFFFFFFF : 0x0;
+                }
+                else
+                {
+                    pRow[j] = (((i / 128) % 2) == 0) ? 0x0 : 0xFFFFFFFF;
+                }
+            }
+        }
+    }
 
     pUploadBuffer->Unmap(0, nullptr);
     
     // copy all
     uploadCommandList->CopyBufferRegion(pVertexBuffer, 0, pUploadBuffer, 0, sizeof vertices);
     uploadCommandList->CopyBufferRegion(pIndexBuffer, 0, pUploadBuffer, sizeof vertices, sizeof indices);
+
+    {
+        D3D12_TEXTURE_COPY_LOCATION dstLoc{
+            .pResource        = pTexture,
+            .Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+            .SubresourceIndex = 0,
+        };
+
+        D3D12_TEXTURE_COPY_LOCATION srcLoc{
+            .pResource       = pUploadBuffer,
+            .Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+            .PlacedFootprint = placedSFP
+        };
+
+        uploadCommandList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+    }
     
-    //TODO: copy texture to GPU
+    D3D12_RESOURCE_BARRIER barrierIB {
+        .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition = {
+            .pResource   = pIndexBuffer,
+            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+            .StateAfter  = D3D12_RESOURCE_STATE_INDEX_BUFFER,
+        }
+    };
+
+    D3D12_RESOURCE_BARRIER barrierVB {
+        .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition = {
+            .pResource   = pVertexBuffer,
+            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+            .StateAfter  = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
+        }
+    };
+
+    D3D12_RESOURCE_BARRIER barrierTex {
+        .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition = {
+            .pResource   = pTexture,
+            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+            .StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        }
+    };
+    
+    D3D12_RESOURCE_BARRIER barriers[] = { barrierIB, barrierVB, barrierTex };
+    uploadCommandList->ResourceBarrier(3, barriers);
 
     uploadCommandList->Close();
 
