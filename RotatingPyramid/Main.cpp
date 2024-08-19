@@ -136,7 +136,7 @@ private:
     void CreatePipelines();
     void CreateCommandLists();
     void CreateSyncObjects();
-    void DownloadData();
+    void DownloadDataAndGenMips();
 
     void UpdateUbo();
     void PopulateCommandList();
@@ -156,18 +156,23 @@ private:
     ID3D12Device9*             pDevice9          = nullptr;
     ID3D12CommandQueue*        pCommandQueue     = nullptr;
     ID3D12CommandQueue*        pCopyQueue        = nullptr;
+
     ID3D12DescriptorHeap*      pRtvHeap          = nullptr;
     ID3D12DescriptorHeap*      pDsvHeap          = nullptr;
     ID3D12DescriptorHeap*      pSrvHeap          = nullptr;
     ID3D12DescriptorHeap*      pSmpHeap          = nullptr;
+
     ID3D12Resource*            pRenderTargets[MAX_FRAMES_IN_FLIGHT] = { nullptr };
     ID3D12CommandAllocator*    pCommandAllocators[MAX_FRAMES_IN_FLIGHT] = { nullptr };
     ID3D12GraphicsCommandList* pCommandList      = nullptr;
     ID3D12Fence*               pFence            = nullptr;
-    ID3D12Heap*                pHeap             = nullptr;
+    ID3D12Heap*                pResourceHeap     = nullptr;
 
     ID3D12RootSignature*       pRootSignature    = nullptr;
     ID3D12PipelineState*       pPipelineState    = nullptr;
+
+    ID3D12RootSignature*       pCsRootSignature  = nullptr;
+    ID3D12PipelineState*       pCsPipelineState  = nullptr;
 
     ID3D12Resource*            pConstantBuffer   = nullptr;
     ID3D12Resource*            pDepthBuffer      = nullptr;
@@ -229,7 +234,7 @@ bool Harmony::Init(HINSTANCE inst) {
 
         CreateSyncObjects();
 
-        DownloadData();
+        DownloadDataAndGenMips();
     }
     catch (std::runtime_error& err) {
         std::cerr << err.what() << std::endl;
@@ -540,7 +545,7 @@ void Harmony::CreateHeaps() {
     {
         D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc {
             .Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            .NumDescriptors = 8,
+            .NumDescriptors = 128, // sufficiently large to hold mipgen SRV and UAV chain
             .Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
         };
 
@@ -593,9 +598,9 @@ void Harmony::CreateHeaps() {
         return memHeap.Detach();
     };
 
-    pHeap = AllocateHeap(DEFAULT_CHUNK_SIZE, D3D12_HEAP_TYPE_DEFAULT);
+    pResourceHeap = AllocateHeap(DEFAULT_CHUNK_SIZE, D3D12_HEAP_TYPE_DEFAULT);
     
-    delQ.Append([cHeap = pHeap] {
+    delQ.Append([cHeap = pResourceHeap] {
         cHeap->Release();
     });
 }
@@ -660,7 +665,7 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &depthDesc);
         
-        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &depthDesc, D3D12_RESOURCE_STATE_COMMON, &dsVal, IID_PPV_ARGS(&pDepthBuffer)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pResourceHeap, defaultHeapOffset, &depthDesc, D3D12_RESOURCE_STATE_COMMON, &dsVal, IID_PPV_ARGS(&pDepthBuffer)))) {
             throw std::runtime_error("Could not create depth buffer!");
         }
 
@@ -672,41 +677,41 @@ void Harmony::CreateResourcesAndViews() {
     }
 
     {
-        D3D12_CLEAR_VALUE texVal{
+        D3D12_CLEAR_VALUE texVal {
             .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
             .Color = { 0.0f, 0.0f, 0.0f, 0.0f }
         };
 
-        D3D12_RESOURCE_DESC texDesc{
-            .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-            .Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
-            .Width = TEXTURE_WIDTH,
-            .Height = TEXTURE_HEIGHT,
+        D3D12_RESOURCE_DESC texDesc {
+            .Dimension  = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width      = TEXTURE_WIDTH,
+            .Height     = TEXTURE_HEIGHT,
             .DepthOrArraySize = 1,
-            .MipLevels = static_cast<UINT16>(log2(TEXTURE_HEIGHT) + 1),
-            .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .MipLevels  = static_cast<UINT16>(log2(TEXTURE_HEIGHT) + 1),
+            .Format     = DXGI_FORMAT_R8G8B8A8_UNORM,
             .SampleDesc = {.Count = 1, .Quality = 0 },
-            .Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
-            .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+            .Layout     = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
+            .Flags      = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
         };
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &texDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &texDesc, D3D12_RESOURCE_STATE_COPY_DEST, &texVal, IID_PPV_ARGS(&pTexture)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pResourceHeap, defaultHeapOffset, &texDesc, D3D12_RESOURCE_STATE_COPY_DEST, &texVal, IID_PPV_ARGS(&pTexture)))) {
             throw std::runtime_error("Could not create texture!");
         }
 
         defaultHeapOffset += resInfo.SizeInBytes;
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{
-            .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
-            .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc {
+            .Format                  = DXGI_FORMAT_R8G8B8A8_UNORM,
+            .ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D,
             .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             .Texture2D = {
-                .MostDetailedMip = 0,
-                .MipLevels = texDesc.MipLevels,
-                .PlaneSlice = 0,
-                .ResourceMinLODClamp = 0.0f
+                .MostDetailedMip     = 0,
+                .MipLevels           = texDesc.MipLevels,
+                .PlaneSlice          = 0,
+                .ResourceMinLODClamp = 5.0f
             }
         };
 
@@ -719,16 +724,16 @@ void Harmony::CreateResourcesAndViews() {
 
     {
         D3D12_SAMPLER_DESC smpDesc {
-            .Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR,
-            .AddressU       = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-            .AddressV       = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
-            .AddressW       = D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+            .Filter         = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+            .AddressU       = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .AddressV       = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+            .AddressW       = D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
             .MipLODBias     = 0.0f,
             .MaxAnisotropy  = 0,
             .ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER,
-            .BorderColor    = { 0.0f, 0.0f, 0.0f, 0.0f },
+            .BorderColor    = D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK,
             .MinLOD         = 0.0f,
-            .MaxLOD         = 0.0f 
+            .MaxLOD         = D3D12_FLOAT32_MAX 
         };
 
         pDevice9->CreateSampler(&smpDesc, pSmpHeap->GetCPUDescriptorHandleForHeapStart());
@@ -750,7 +755,7 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &vbDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pResourceHeap, defaultHeapOffset, &vbDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&pVertexBuffer)))) {
             throw std::runtime_error("Could not create vertex buffer!");
         }
 
@@ -777,7 +782,7 @@ void Harmony::CreateResourcesAndViews() {
 
         D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &ibDesc);
 
-        if (FAILED(pDevice9->CreatePlacedResource(pHeap, defaultHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
+        if (FAILED(pDevice9->CreatePlacedResource(pResourceHeap, defaultHeapOffset, &ibDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&pIndexBuffer)))) {
             throw std::runtime_error("Could not create index buffer!");
         }
 
@@ -816,19 +821,17 @@ void Harmony::CreateResourcesAndViews() {
 }
 
 void Harmony::CreatePipelines() {
-    ComPtr<ID3DBlob>            errBlob;
+    D3D12_FEATURE_DATA_ROOT_SIGNATURE rootFeatures = {};
 
-    // root signature has 3 params for the shader
+    rootFeatures.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+
+    if (FAILED(pDevice9->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &rootFeatures, sizeof rootFeatures))) {
+        rootFeatures.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1;
+    }
+
+    // Graphics root signature (has 3 params for the shader)
     {
-        D3D12_FEATURE_DATA_ROOT_SIGNATURE rootFeatures = {};
-
-        rootFeatures.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
-
-        if (FAILED(pDevice9->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &rootFeatures, sizeof rootFeatures))) {
-            rootFeatures.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1;
-        }
-
-        D3D12_ROOT_PARAMETER    rootParams[3];
+        D3D12_ROOT_PARAMETER rootParams[3];
 
         D3D12_DESCRIPTOR_RANGE  descRange[3] = {
             {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
@@ -875,27 +878,48 @@ void Harmony::CreatePipelines() {
         pRootSignature = rs.Detach();
         delQ.Append([cRootSignature = pRootSignature] {
             cRootSignature->Release();
-            });
+        });
     }
 
-    // pipeline
+    // Graphics pipeline
     {
-        ComPtr<ID3DBlob>            vs, ps;
-        ComPtr<ID3DBlob>            errBlob;
         ComPtr<ID3D12PipelineState> pso;
-
+        std::vector<char>           vs, ps;
+        
         UINT compileFlags = 0;
 
         if constexpr (enableDebugLayers) {
             compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
         }
 
-        if (FAILED(D3DCompileFromFile(L"shaders/shaders.hlsl", nullptr, nullptr, "VsMain", "vs_5_1", compileFlags, 0, &vs, &errBlob))) {
-            throw std::runtime_error(reinterpret_cast<const char *>(errBlob->GetBufferPointer()));
+        //load VS
+        {
+            std::ifstream file("shaders/vs.bin", std::ios::in | std::ios::binary);
+            if (!file) {
+                throw std::runtime_error("Could not load vs.bin!");
+            }
+
+            file.seekg(0, std::ios_base::end);
+            std::streampos filesize = file.tellg();
+            file.seekg(0, std::ios_base::beg);
+
+            vs.resize((size_t)filesize);
+            file.read(vs.data(), filesize);
         }
 
-        if (FAILED(D3DCompileFromFile(L"shaders/shaders.hlsl", nullptr, nullptr, "PsMain", "ps_5_1", compileFlags, 0, &ps, &errBlob))) {
-            throw std::runtime_error(reinterpret_cast<const char *>(errBlob->GetBufferPointer()));
+        // load PS
+        {
+            std::ifstream file("shaders/ps.bin", std::ios::in | std::ios::binary);
+            if (!file) {
+                throw std::runtime_error("Could not load ps.bin!");
+            }
+
+            file.seekg(0, std::ios_base::end);
+            std::streampos filesize = file.tellg();
+            file.seekg(0, std::ios_base::beg);
+
+            ps.resize((size_t)filesize);
+            file.read(ps.data(), filesize);
         }
 
         D3D12_INPUT_ELEMENT_DESC inputElementDesc[] = {
@@ -904,9 +928,10 @@ void Harmony::CreatePipelines() {
             { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         };
 
-        D3D12_BLEND_DESC blendDesc;
-        blendDesc.AlphaToCoverageEnable  = FALSE;
-        blendDesc.IndependentBlendEnable = FALSE;
+        D3D12_BLEND_DESC blendDesc {
+            .AlphaToCoverageEnable  = FALSE,
+            .IndependentBlendEnable = FALSE
+        };
 
         for (UINT i = 0; i < 8; ++i) {
             blendDesc.RenderTarget[i] = {
@@ -918,54 +943,57 @@ void Harmony::CreatePipelines() {
             };
         }
 
-        D3D12_RASTERIZER_DESC rastDesc;
-        rastDesc.FillMode              = D3D12_FILL_MODE_SOLID;
-        rastDesc.CullMode              = D3D12_CULL_MODE_BACK;
-        rastDesc.FrontCounterClockwise = FALSE;
-        rastDesc.DepthBias             = 0;
-        rastDesc.DepthBiasClamp        = 0.0f;
-        rastDesc.SlopeScaledDepthBias  = 0.0f;
-        rastDesc.DepthClipEnable       = FALSE;
-        rastDesc.MultisampleEnable     = FALSE;
-        rastDesc.AntialiasedLineEnable = FALSE;
-        rastDesc.ForcedSampleCount     = 0;
-        rastDesc.ConservativeRaster    = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
-
-        D3D12_DEPTH_STENCILOP_DESC defaultStencilOp = {
-            D3D12_STENCIL_OP_KEEP,
-            D3D12_STENCIL_OP_KEEP,
-            D3D12_STENCIL_OP_KEEP,
-            D3D12_COMPARISON_FUNC_ALWAYS
+        D3D12_RASTERIZER_DESC rastDesc {
+            .FillMode               = D3D12_FILL_MODE_SOLID,
+            .CullMode               = D3D12_CULL_MODE_BACK,
+            .FrontCounterClockwise  = FALSE,
+            .DepthBias              = 0,
+            .DepthBiasClamp         = 0.0f,
+            .SlopeScaledDepthBias   = 0.0f,
+            .DepthClipEnable        = FALSE,
+            .MultisampleEnable      = FALSE,
+            .AntialiasedLineEnable  = FALSE,
+            .ForcedSampleCount      = 0,
+            .ConservativeRaster     = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF
         };
 
-        D3D12_DEPTH_STENCIL_DESC dsDesc;
-        dsDesc.DepthEnable      = TRUE;
-        dsDesc.DepthWriteMask   = D3D12_DEPTH_WRITE_MASK_ALL;
-        dsDesc.DepthFunc        = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-        dsDesc.StencilEnable    = FALSE;
-        dsDesc.StencilReadMask  = 0;
-        dsDesc.StencilWriteMask = 0;
-        dsDesc.FrontFace        = defaultStencilOp;
-        dsDesc.BackFace         = defaultStencilOp;
+        D3D12_DEPTH_STENCILOP_DESC defaultStencilOp {
+            .StencilFailOp      = D3D12_STENCIL_OP_KEEP,
+            .StencilDepthFailOp = D3D12_STENCIL_OP_KEEP,
+            .StencilPassOp      = D3D12_STENCIL_OP_KEEP,
+            .StencilFunc        = D3D12_COMPARISON_FUNC_ALWAYS
+        };
 
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{ 0 };
-        psoDesc.pRootSignature        = pRootSignature;
-        psoDesc.VS                    = D3D12_SHADER_BYTECODE{ .pShaderBytecode = vs->GetBufferPointer(), .BytecodeLength = vs->GetBufferSize() };
-        psoDesc.PS                    = D3D12_SHADER_BYTECODE{ .pShaderBytecode = ps->GetBufferPointer(), .BytecodeLength = ps->GetBufferSize() };
-        psoDesc.BlendState            = blendDesc;
-        psoDesc.SampleMask            = D3D12_DEFAULT_SAMPLE_MASK;
-        psoDesc.RasterizerState       = rastDesc;
-        psoDesc.DepthStencilState     = dsDesc;
-        psoDesc.InputLayout           = { .pInputElementDescs = inputElementDesc, .NumElements = 3 };
-        psoDesc.IBStripCutValue       = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        psoDesc.NumRenderTargets      = 1;
-        psoDesc.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
-        psoDesc.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
-        psoDesc.SampleDesc            = { .Count = 1, .Quality = 0 };
-        psoDesc.NodeMask              = 0;
-        psoDesc.CachedPSO             = { .pCachedBlob = nullptr, .CachedBlobSizeInBytes = 0 };
-        psoDesc.Flags                 = D3D12_PIPELINE_STATE_FLAG_NONE;
+        D3D12_DEPTH_STENCIL_DESC dsDesc {
+            .DepthEnable      = TRUE,
+            .DepthWriteMask   = D3D12_DEPTH_WRITE_MASK_ALL,
+            .DepthFunc        = D3D12_COMPARISON_FUNC_LESS_EQUAL,
+            .StencilEnable    = FALSE,
+            .StencilReadMask  = 0,
+            .StencilWriteMask = 0,
+            .FrontFace        = defaultStencilOp,
+            .BackFace         = defaultStencilOp
+        };
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc {
+            .pRootSignature        = pRootSignature,
+            .VS                    = { .pShaderBytecode = vs.data(), .BytecodeLength = vs.size() },
+            .PS                    = { .pShaderBytecode = ps.data(), .BytecodeLength = ps.size() },
+            .BlendState            = blendDesc,
+            .SampleMask            = D3D12_DEFAULT_SAMPLE_MASK,
+            .RasterizerState       = rastDesc,
+            .DepthStencilState     = dsDesc,
+            .InputLayout           = { .pInputElementDescs = inputElementDesc, .NumElements = 3 },
+            .IBStripCutValue       = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,
+            .PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+            .NumRenderTargets      = 1,
+            .RTVFormats            = { DXGI_FORMAT_R8G8B8A8_UNORM },
+            .DSVFormat             = DXGI_FORMAT_D32_FLOAT,
+            .SampleDesc            = { .Count = 1, .Quality = 0 },
+            .NodeMask              = 0,
+            .CachedPSO             = { .pCachedBlob = nullptr, .CachedBlobSizeInBytes = 0 },
+            .Flags                 = D3D12_PIPELINE_STATE_FLAG_NONE
+        };
 
         if(FAILED(pDevice9->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso)))) {
             throw std::runtime_error("Could not create pipeline state object!");
@@ -976,6 +1004,109 @@ void Harmony::CreatePipelines() {
         delQ.Append([cPipelineState = pPipelineState] {
             cPipelineState->Release();
             });
+    }
+
+    // Compute root signature (has 3 params and 1 root constant)
+    {
+        D3D12_ROOT_PARAMETER rootParams[4];
+
+        D3D12_DESCRIPTOR_RANGE  descRange[3] = {
+            {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
+            {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
+            {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
+        };
+
+        rootParams[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rootParams[0].Constants.ShaderRegister            = 0;
+        rootParams[0].Constants.RegisterSpace             = 0;
+        rootParams[0].Constants.Num32BitValues            = 2;
+        rootParams[0].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+
+        rootParams[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[1].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[1].DescriptorTable.pDescriptorRanges   = &descRange[0];
+        rootParams[1].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+
+        rootParams[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[2].DescriptorTable.pDescriptorRanges   = &descRange[1];
+        rootParams[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+
+        rootParams[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[3].DescriptorTable.pDescriptorRanges   = &descRange[2];
+        rootParams[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+
+        D3D12_ROOT_SIGNATURE_DESC rDesc {
+            .NumParameters     = 4,
+            .pParameters       = rootParams,
+            .NumStaticSamplers = 0,
+            .pStaticSamplers   = nullptr,
+            .Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE
+        };
+
+        ComPtr<ID3DBlob> signature;
+        ComPtr<ID3DBlob> errBlob;
+
+        // FIXME: Root signature version 1_1 not working
+        if (FAILED(D3D12SerializeRootSignature(&rDesc, /*rootFeatures.HighestVersion*/ D3D_ROOT_SIGNATURE_VERSION_1, &signature, &errBlob))) {
+            throw std::runtime_error(reinterpret_cast<const char*>(errBlob->GetBufferPointer()));
+        }
+
+        ComPtr<ID3D12RootSignature> cs;
+        if (FAILED(pDevice9->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&cs)))) {
+            throw std::runtime_error("Could not create root signature!");
+        }
+
+        pCsRootSignature = cs.Detach();
+        delQ.Append([cRootSignature = pCsRootSignature] {
+            cRootSignature->Release();
+        });
+    }
+
+    // Compute pipeline
+    {
+        ComPtr<ID3D12PipelineState> pso;
+        std::vector<char>           cs;
+
+        UINT compileFlags = 0;
+
+        if constexpr (enableDebugLayers) {
+            compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+        }
+
+        //load CS
+        {
+            std::ifstream file("shaders/mipgen.bin", std::ios::in | std::ios::binary);
+            if (!file) {
+                throw std::runtime_error("Could not load mipgen.bin!");
+            }
+
+            file.seekg(0, std::ios_base::end);
+            std::streampos filesize = file.tellg();
+            file.seekg(0, std::ios_base::beg);
+
+            cs.resize((size_t)filesize);
+            file.read(cs.data(), filesize);
+        }
+
+        D3D12_COMPUTE_PIPELINE_STATE_DESC psoDesc {
+            .pRootSignature = pCsRootSignature,
+            .CS             = { .pShaderBytecode = cs.data(), .BytecodeLength = cs.size() },
+            .NodeMask       = 0,
+            .CachedPSO      = { .pCachedBlob = nullptr, .CachedBlobSizeInBytes = 0 },
+            .Flags          = D3D12_PIPELINE_STATE_FLAG_NONE
+        };
+
+        if(FAILED(pDevice9->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&pso)))) {
+            throw std::runtime_error("Could not create compute pipeline state object!");
+        }
+
+        pCsPipelineState = pso.Detach();
+
+        delQ.Append([cPipelineState = pCsPipelineState] {
+            cPipelineState->Release();
+        });
     }
 }
 
@@ -1023,31 +1154,31 @@ void Harmony::CreateSyncObjects() {
     });
 }
 
-void Harmony::DownloadData() {
-    ComPtr<ID3D12GraphicsCommandList>   uploadCommandList;
-    ComPtr<ID3D12CommandAllocator>      uploadCommandAllocator;
-    ComPtr<ID3D12Fence>                 uploadFence;
+void Harmony::DownloadDataAndGenMips() {
+    ComPtr<ID3D12GraphicsCommandList>   initCmdlist;
+    ComPtr<ID3D12CommandAllocator>      initCmdAllocator;
+    ComPtr<ID3D12Fence>                 initFence;
 
     HRESULT hr;
     void*   pData = nullptr;
 
-    hr = pDevice9->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS (&uploadFence));
+    hr = pDevice9->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS (&initFence));
     if (FAILED(hr)) {
         throw std::runtime_error("Could not create fence!");
     }
     
-    hr = pDevice9->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS (&uploadCommandAllocator));
+    hr = pDevice9->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS (&initCmdAllocator));
     if (FAILED(hr)) {
         throw std::runtime_error("Could not create command allocator!");
     }
 
-    hr = pDevice9->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, uploadCommandAllocator.Get (), nullptr, IID_PPV_ARGS (&uploadCommandList));
+    hr = pDevice9->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, initCmdAllocator.Get (), nullptr, IID_PPV_ARGS (&initCmdlist));
     if (FAILED(hr)) {
         throw std::runtime_error("Could not create command list!");
     }
 
-    HANDLE uploadWaitEvent = CreateEvent (nullptr, FALSE, FALSE, nullptr);
-    if (uploadWaitEvent == NULL) {
+    HANDLE initCompleteEvent = CreateEvent (nullptr, FALSE, FALSE, nullptr);
+    if (initCompleteEvent == NULL) {
         throw std::runtime_error("Could not create event!");
     }
 
@@ -1131,8 +1262,8 @@ void Harmony::DownloadData() {
     pUploadBuffer->Unmap(0, nullptr);
     
     // copy all
-    uploadCommandList->CopyBufferRegion(pVertexBuffer, 0, pUploadBuffer, 0, sizeof vertices);
-    uploadCommandList->CopyBufferRegion(pIndexBuffer, 0, pUploadBuffer, sizeof vertices, sizeof indices);
+    initCmdlist->CopyBufferRegion(pVertexBuffer, 0, pUploadBuffer, 0, sizeof vertices);
+    initCmdlist->CopyBufferRegion(pIndexBuffer, 0, pUploadBuffer, sizeof vertices, sizeof indices);
 
     {
         D3D12_TEXTURE_COPY_LOCATION dstLoc{
@@ -1147,9 +1278,13 @@ void Harmony::DownloadData() {
             .PlacedFootprint = placedSFP
         };
 
-        uploadCommandList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+        initCmdlist->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
     }
     
+    //
+    // Transition resources to thier next OPs
+    //
+
     D3D12_RESOURCE_BARRIER barrierIB {
         .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
         .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -1179,22 +1314,115 @@ void Harmony::DownloadData() {
             .pResource   = pTexture,
             .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
             .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
-            .StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            .StateAfter  = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,   // to Gen Mips
         }
     };
     
     D3D12_RESOURCE_BARRIER barriers[] = { barrierIB, barrierVB, barrierTex };
-    uploadCommandList->ResourceBarrier(3, barriers);
+    initCmdlist->ResourceBarrier(3, barriers);
 
-    uploadCommandList->Close();
+    //
+    // Generate texture mip maps
+    //
 
-    ID3D12CommandList* commandLists[] = { uploadCommandList.Get() };
+    D3D12_RESOURCE_DESC tdesc = pTexture->GetDesc();
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc {
+        .Format                  = tdesc.Format,
+        .ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D,
+        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        .Texture2D               = { .MostDetailedMip = 0, .MipLevels = 1, .PlaneSlice = 0, .ResourceMinLODClamp = 0.0f }
+    };
+    
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc {
+        .Format                  = tdesc.Format,
+        .ViewDimension           = D3D12_UAV_DIMENSION_TEXTURE2D,
+        .Texture2D               = { .MipSlice = 0, .PlaneSlice = 0 }
+    };
+    
+    initCmdlist->SetComputeRootSignature(pCsRootSignature);
+    initCmdlist->SetPipelineState(pCsPipelineState);
+    
+    ID3D12DescriptorHeap* pDescHeaps[2] = { pSrvHeap, pSmpHeap };
+
+    initCmdlist->SetDescriptorHeaps(2, pDescHeaps);
+
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE srvHandle = pSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = pSrvHeap->GetGPUDescriptorHandleForHeapStart();
+
+        D3D12_CPU_DESCRIPTOR_HANDLE uavHandle = pSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_GPU_DESCRIPTOR_HANDLE uavGpuHandle = pSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        
+        UINT mipgenSrvHeapOffset = 1;
+
+        D3D12_RESOURCE_BARRIER uavBarrier {
+            .Type  = D3D12_RESOURCE_BARRIER_TYPE_UAV,
+            .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            .UAV   = pTexture
+        };
+
+        union FloatAsInt {
+            UINT  u;
+            FLOAT f;
+
+            explicit FloatAsInt(float val)
+                : f(val)
+            {}
+        };
+
+        // set sampler state in root once
+        initCmdlist->SetComputeRootDescriptorTable(3, pSmpHeap->GetGPUDescriptorHandleForHeapStart());
+
+        for (UINT16 i = 0; i < (tdesc.MipLevels - 1); ++i) {
+            UINT dstWidth  = TEXTURE_WIDTH  >> (i + 1);
+            UINT dstHeight = TEXTURE_HEIGHT >> (i + 1);
+
+            SIZE_T bytesToSrv = (mipgenSrvHeapOffset + i) * srvDescriptorSize;
+
+            srvHandle.ptr += bytesToSrv;
+            srvGpuHandle.ptr += bytesToSrv;
+
+            SIZE_T bytesToUav = (mipgenSrvHeapOffset + i + 1) * srvDescriptorSize;
+
+            uavHandle.ptr += bytesToUav;
+            uavGpuHandle.ptr += bytesToUav;
+
+            srvDesc.Texture2D.MostDetailedMip = i;
+            pDevice9->CreateShaderResourceView(pTexture, &srvDesc, srvHandle);
+
+            uavDesc.Texture2D.MipSlice = i + 1;
+            pDevice9->CreateUnorderedAccessView(pTexture, nullptr, &uavDesc, uavHandle);
+
+            UINT rootConstData[2] = { FloatAsInt(1.0f / dstWidth).u, FloatAsInt(1.0f / dstHeight).u };
+
+            initCmdlist->SetComputeRoot32BitConstants(0, 2, rootConstData, 0);
+            initCmdlist->SetComputeRootDescriptorTable(1, srvGpuHandle);
+            initCmdlist->SetComputeRootDescriptorTable(2, uavGpuHandle);
+            
+            UINT dispatchX = max(dstWidth  / 8, 1u);
+            UINT dispatchY = max(dstHeight / 8, 1u);
+
+            initCmdlist->Dispatch(dispatchX, dispatchY, 1);
+
+            initCmdlist->ResourceBarrier(1, &uavBarrier);
+        }
+
+        barrierTex.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barrierTex.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+        initCmdlist->ResourceBarrier(1, &barrierTex);
+    }
+    
+    initCmdlist->Close();
+
+    ID3D12CommandList* commandLists[] = { initCmdlist.Get() };
     pCommandQueue->ExecuteCommandLists(1, commandLists);
-    pCommandQueue->Signal(uploadFence.Get(), 1);
+    pCommandQueue->Signal(initFence.Get(), 1);
 
-    WaitForFence(uploadFence.Get(), 1, uploadWaitEvent);
-    uploadCommandAllocator->Reset();
-    CloseHandle(uploadWaitEvent);
+    WaitForFence(initFence.Get(), 1, initCompleteEvent);
+    initCmdAllocator->Reset();
+    CloseHandle(initCompleteEvent);
 }
 
 #pragma endregion
