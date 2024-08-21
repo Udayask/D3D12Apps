@@ -30,11 +30,19 @@ VsOutput VsMain(VsInput v)
     return output;
 }
 
-Texture2D<float4> colorTexture : register(t0);
-SamplerState      colorSampler : register(s0);
+Texture2D<float4>                           colorTexture  : register(t0);
+SamplerState                                colorSampler  : register(s0);
+FeedbackTexture2D<SAMPLER_FEEDBACK_MIN_MIP> colorFeedback : register(u0);
 
 float4 PsMain(VsOutput vo) : SV_Target
 {
     float4 tex = colorTexture.Sample(colorSampler, vo.uv);
     return tex + float4(vo.color, 1.0f);
+}
+
+float4 PsFeedback(VsOutput vo) : SV_Target
+{
+    colorFeedback.WriteSamplerFeedback(colorTexture, colorSampler, vo.uv);
+    
+    return PsMain(vo);
 }

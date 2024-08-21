@@ -29,6 +29,9 @@ using Microsoft::WRL::ComPtr;
 #define TEXTURE_WIDTH           1024
 #define TEXTURE_HEIGHT          1024
 
+#define TEXTURE_MMW             128
+#define TEXTURE_MMH             128
+
 class DeletionQueue {
 public:
     using Fn    = std::function<void()>;
@@ -140,63 +143,67 @@ private:
 
     void UpdateUbo();
     void PopulateCommandList();
-    void MoveToNextFrame();
+    void MoveToNextFrame(bool singlestep = true);
     void WaitForGpu();
     void Render();
 
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam,
         LPARAM lParam);
 
-    DeletionQueue              delQ;
+    DeletionQueue               delQ;
 
-    IDXGIFactory7*             pFactory7         = nullptr;
-    IDXGIAdapter1*             pAdapter1         = nullptr;
-    IDXGISwapChain4*           pSwapChain4       = nullptr;
+    IDXGIFactory7*              pFactory7         = nullptr;
+    IDXGIAdapter1*              pAdapter1         = nullptr;
+    IDXGISwapChain4*            pSwapChain4       = nullptr;
 
-    ID3D12Device9*             pDevice9          = nullptr;
-    ID3D12CommandQueue*        pCommandQueue     = nullptr;
-    ID3D12CommandQueue*        pCopyQueue        = nullptr;
+    ID3D12Device9*              pDevice9          = nullptr;
+    ID3D12CommandQueue*         pCommandQueue     = nullptr;
+    ID3D12CommandQueue*         pCopyQueue        = nullptr;
 
-    ID3D12DescriptorHeap*      pRtvHeap          = nullptr;
-    ID3D12DescriptorHeap*      pDsvHeap          = nullptr;
-    ID3D12DescriptorHeap*      pSrvHeap          = nullptr;
-    ID3D12DescriptorHeap*      pSmpHeap          = nullptr;
+    ID3D12DescriptorHeap*       pRtvHeap          = nullptr;
+    ID3D12DescriptorHeap*       pDsvHeap          = nullptr;
+    ID3D12DescriptorHeap*       pSrvHeap          = nullptr;
+    ID3D12DescriptorHeap*       pUavHeap          = nullptr;
+    ID3D12DescriptorHeap*       pSmpHeap          = nullptr;
 
-    ID3D12Resource*            pRenderTargets[MAX_FRAMES_IN_FLIGHT] = { nullptr };
-    ID3D12CommandAllocator*    pCommandAllocators[MAX_FRAMES_IN_FLIGHT] = { nullptr };
-    ID3D12GraphicsCommandList* pCommandList      = nullptr;
-    ID3D12Fence*               pFence            = nullptr;
-    ID3D12Heap*                pResourceHeap     = nullptr;
+    ID3D12Resource*             pRenderTargets[MAX_FRAMES_IN_FLIGHT] = { nullptr };
+    ID3D12CommandAllocator*     pCommandAllocators[MAX_FRAMES_IN_FLIGHT] = { nullptr };
+    ID3D12GraphicsCommandList1* pCommandList      = nullptr;
+    ID3D12Fence*                pFence            = nullptr;
+    ID3D12Heap*                 pResourceHeap     = nullptr;
 
-    ID3D12RootSignature*       pRootSignature    = nullptr;
-    ID3D12PipelineState*       pPipelineState    = nullptr;
+    ID3D12RootSignature*        pRootSignature    = nullptr;
+    ID3D12PipelineState*        pPipelineState    = nullptr;
 
-    ID3D12RootSignature*       pCsRootSignature  = nullptr;
-    ID3D12PipelineState*       pCsPipelineState  = nullptr;
+    ID3D12RootSignature*        pCsRootSignature  = nullptr;
+    ID3D12PipelineState*        pCsPipelineState  = nullptr;
 
-    ID3D12Resource*            pConstantBuffer   = nullptr;
-    ID3D12Resource*            pDepthBuffer      = nullptr;
-    ID3D12Resource*            pTexture          = nullptr;
-    ID3D12Resource*            pFeedbackTexture  = nullptr;
-    ID3D12Resource*            pVertexBuffer     = nullptr;
-    ID3D12Resource*            pIndexBuffer      = nullptr;
-    ID3D12Resource*            pUploadBuffer     = nullptr;
+    ID3D12Resource*             pConstantBuffer   = nullptr;
+    ID3D12Resource*             pDepthBuffer      = nullptr;
+    ID3D12Resource*             pTexture          = nullptr;
+    ID3D12Resource*             pFeedbackTexture  = nullptr;
+    ID3D12Resource*             pResolveTexture   = nullptr;
+    ID3D12Resource*             pVertexBuffer     = nullptr;
+    ID3D12Resource*             pIndexBuffer      = nullptr;
+    ID3D12Resource*             pUploadBuffer     = nullptr;
+    ID3D12Resource*             pFeedbackBuffer   = nullptr;
 
-    HINSTANCE                  hInstance         = NULL;
-    HWND                       hMainWindow       = NULL;
+    HINSTANCE                   hInstance         = NULL;
+    HWND                        hMainWindow       = NULL;
 
-    UINT                       frameIndex        = 0;
-    HANDLE                     fenceHandle       = NULL;
-    UINT64                     fenceValues[MAX_FRAMES_IN_FLIGHT] = { 0 };
+    UINT                        frameIndex        = 0;
+    HANDLE                      fenceHandle       = NULL;
+    UINT64                      fenceValues[MAX_FRAMES_IN_FLIGHT] = { 0 };
 
-    UINT                       rtvDescriptorSize = 0;
-    UINT                       dsvDescriptorSize = 0;
-    UINT                       srvDescriptorSize = 0;
-    UINT                       smpDescriptorSize = 0;
+    UINT                        rtvDescriptorSize    = 0;
+    UINT                        dsvDescriptorSize    = 0;
+    UINT                        srvDescriptorSize    = 0;
+    UINT                        srvCpuDescriptorSize = 0;
+    UINT                        smpDescriptorSize    = 0;
 
-    D3D_FEATURE_LEVEL          featureLevel      = D3D_FEATURE_LEVEL_12_2;
-    D3D12_VIEWPORT             viewport;
-    D3D12_RECT                 scissorRect;
+    D3D_FEATURE_LEVEL           featureLevel         = D3D_FEATURE_LEVEL_12_2;
+    D3D12_VIEWPORT              viewport;
+    D3D12_RECT                  scissorRect;
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS featureDataOpts;
 
@@ -557,7 +564,15 @@ void Harmony::CreateHeaps() {
         srvDescriptorSize = pDevice9->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         pSrvHeap = descriptorHeap.Detach();
 
-        delQ.Append([cHeap = pSrvHeap] {
+        // CPU only (for UAV clear)
+        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        if (FAILED(pDevice9->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&descriptorHeap)))) {
+            throw std::runtime_error("Could not create CBV_SRV_UAV CPU only heap!");
+        }
+
+        pUavHeap = descriptorHeap.Detach();
+
+        delQ.Append([cHeap = pUavHeap] {
             cHeap->Release();
         });
     }
@@ -645,6 +660,43 @@ void Harmony::CreateResourcesAndViews() {
             cbuff->Release();
         });
     }
+
+    // Feedback readback
+    {
+        D3D12_RESOURCE_DESC fbBuffDesc {
+            .Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER,
+            .Alignment        = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width            = (TEXTURE_WIDTH / TEXTURE_MMW) * (TEXTURE_HEIGHT / TEXTURE_MMH), // 16 texels
+            .Height           = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels        = 1,
+            .Format           = DXGI_FORMAT_UNKNOWN,
+            .SampleDesc       = { .Count = 1, .Quality = 0 },
+            .Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            .Flags            = D3D12_RESOURCE_FLAG_NONE,
+        };
+
+        D3D12_HEAP_PROPERTIES readbackHeapProps {
+            .Type                   = D3D12_HEAP_TYPE_READBACK,
+            .CPUPageProperty        = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+            .MemoryPoolPreference   = D3D12_MEMORY_POOL_UNKNOWN,
+            .CreationNodeMask       = 0,
+            .VisibleNodeMask        = 0
+        };
+
+        D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &fbBuffDesc);
+        if (resInfo.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+            fbBuffDesc.Alignment = resInfo.Alignment;
+        }
+
+        if (FAILED(pDevice9->CreateCommittedResource(&readbackHeapProps, D3D12_HEAP_FLAG_NONE, &fbBuffDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&pFeedbackBuffer)))) {
+            throw std::runtime_error("Could not create readback buffer!");
+        }
+
+        delQ.Append([cbuff = pFeedbackBuffer] {
+            cbuff->Release();
+            });
+    }
     
     // DS
     {
@@ -729,7 +781,7 @@ void Harmony::CreateResourcesAndViews() {
             .SampleDesc = {.Count = 1, .Quality = 0 },
             .Layout     = D3D12_TEXTURE_LAYOUT_UNKNOWN,
             .Flags      = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-            .SamplerFeedbackMipRegion = { .Width = 128, .Height = 128, .Depth = 1 }
+            .SamplerFeedbackMipRegion = { .Width = TEXTURE_MMW, .Height = TEXTURE_MMH, .Depth = 1 }
         };
 
         D3D12_RESOURCE_ALLOCATION_INFO fbInfo = pDevice9->GetResourceAllocationInfo2(0, 1, &feedbackDesc, nullptr);
@@ -767,6 +819,40 @@ void Harmony::CreateResourcesAndViews() {
         //
         viewCpuHandle.ptr += srvDescriptorSize;
         pDevice9->CreateSamplerFeedbackUnorderedAccessView(pTexture, pFeedbackTexture, viewCpuHandle);
+
+        //
+        // feedback UAV CPU only Heap handle
+        //
+        viewCpuHandle = pUavHeap->GetCPUDescriptorHandleForHeapStart();
+        pDevice9->CreateSamplerFeedbackUnorderedAccessView(pTexture, pFeedbackTexture, viewCpuHandle);
+    }
+
+    // Feedback resolve texture
+    {
+        D3D12_RESOURCE_DESC fbDesc {
+            .Dimension  = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            .Alignment  = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            .Width      = (TEXTURE_WIDTH / TEXTURE_MMW) * (TEXTURE_HEIGHT / TEXTURE_MMH), // 16 texels
+            .Height     = 1,
+            .DepthOrArraySize = 1,
+            .MipLevels  = 1,
+            .Format     = DXGI_FORMAT_R8_UINT,
+            .SampleDesc = {.Count = 1, .Quality = 0 },
+            .Layout     = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            .Flags      = D3D12_RESOURCE_FLAG_NONE,
+        };
+
+        D3D12_RESOURCE_ALLOCATION_INFO resInfo = pDevice9->GetResourceAllocationInfo(0, 1, &fbDesc);
+
+        if (FAILED(pDevice9->CreatePlacedResource(pResourceHeap, defaultHeapOffset, &fbDesc, D3D12_RESOURCE_STATE_RESOLVE_DEST, nullptr, IID_PPV_ARGS(&pResolveTexture)))) {
+            throw std::runtime_error("Could not create resolve texture!");
+        }
+
+        defaultHeapOffset += resInfo.SizeInBytes;
+
+        delQ.Append([ctex = pResolveTexture] {
+            ctex->Release();
+            });
     }
 
     // Sampler 
@@ -881,13 +967,14 @@ void Harmony::CreatePipelines() {
         rootFeatures.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1;
     }
 
-    // Graphics root signature (has 3 params for the shader)
+    // Graphics root signature (has 4 params for the shader)
     {
-        D3D12_ROOT_PARAMETER rootParams[3];
+        D3D12_ROOT_PARAMETER rootParams[4];
 
-        D3D12_DESCRIPTOR_RANGE  descRange[3] = {
+        D3D12_DESCRIPTOR_RANGE  descRange[4] = {
             {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
             {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
+            {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV,     .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
             {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, .NumDescriptors = 1, .BaseShaderRegister = 0, .RegisterSpace = 0, .OffsetInDescriptorsFromTableStart = 0 },
         };
 
@@ -906,8 +993,13 @@ void Harmony::CreatePipelines() {
         rootParams[2].DescriptorTable.pDescriptorRanges   = &descRange[2];
         rootParams[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
+        rootParams[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
+        rootParams[3].DescriptorTable.pDescriptorRanges   = &descRange[3];
+        rootParams[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
         D3D12_ROOT_SIGNATURE_DESC rDesc {
-            .NumParameters     = 3,
+            .NumParameters     = 4,
             .pParameters       = rootParams,
             .NumStaticSamplers = 0,
             .pStaticSamplers   = nullptr,
@@ -1174,7 +1266,10 @@ void Harmony::CreateCommandLists() {
         throw std::runtime_error("Could not create command list!");
     }
 
-    pCommandList = cmdList.Detach();
+    if (FAILED(cmdList->QueryInterface<ID3D12GraphicsCommandList1>(&pCommandList))) {
+        throw std::runtime_error("Could not query cmdlist1 interface!");
+    }
+
     pCommandList->Close();
 
     delQ.Append([cCommandList = pCommandList, cCommandAllocators = pCommandAllocators] {
@@ -1534,6 +1629,9 @@ void Harmony::UpdateUbo() {
     XMMATRIX  world      = XMMatrixRotationY(time * XMConvertToRadians(90.0f));
     world *= XMMatrixTranslation(0.0f, yDisplacement, 0.0f);
 
+    float scaleValue     = (sin(time) * 0.5f) + 0.5f;
+    world *= XMMatrixScaling(scaleValue, scaleValue, scaleValue);
+
     XMMATRIX  view       = XMMatrixLookAtLH( Eye, At, Up );
     XMMATRIX  projection = XMMatrixPerspectiveFovLH(70, WINDOW_WIDTH / float(WINDOW_HEIGHT), 0.1f, 20.0f);
     
@@ -1579,21 +1677,38 @@ void Harmony::PopulateCommandList() {
         }
     };
 
-    D3D12_RESOURCE_BARRIER barriersIn[] = { rtBarrier, dsBarrier };
-    pCommandList->ResourceBarrier(2, barriersIn);
+    // PRESENT -> RT barriers
+    {
+        D3D12_RESOURCE_BARRIER barriersIn[] = { rtBarrier, dsBarrier };
+        pCommandList->ResourceBarrier(2, barriersIn);
+    }
 
     D3D12_CPU_DESCRIPTOR_HANDLE rtHandle = static_cast<D3D12_CPU_DESCRIPTOR_HANDLE>(pRtvHeap->GetCPUDescriptorHandleForHeapStart().ptr + frameIndex * rtvDescriptorSize);
     D3D12_CPU_DESCRIPTOR_HANDLE dsHandle = pDsvHeap->GetCPUDescriptorHandleForHeapStart();
-
+  
     pCommandList->OMSetRenderTargets(1, &rtHandle, FALSE, &dsHandle);
-
     pCommandList->RSSetViewports(1, &viewport);
     pCommandList->RSSetScissorRects(1, &scissorRect);
 
+    ID3D12DescriptorHeap* pDescHeaps[2] = { pSrvHeap, pSmpHeap };
+    pCommandList->SetDescriptorHeaps(2, pDescHeaps);
+
+    //
+    // clear RT & depth
+    //
     const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
     pCommandList->ClearRenderTargetView(rtHandle, clearColor, 0, nullptr);
     pCommandList->ClearDepthStencilView(dsHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
     pCommandList->IASetPrimitiveTopology(D3D12_PRIMITIVE_TOPOLOGY::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    //
+    // Clear feedback
+    //
+    D3D12_CPU_DESCRIPTOR_HANDLE fbCpuHandle = pUavHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE fbGpuHandle = static_cast<D3D12_GPU_DESCRIPTOR_HANDLE>(pSrvHeap->GetGPUDescriptorHandleForHeapStart().ptr + srvDescriptorSize);
+
+    const UINT clearValue[] = { 0, 0, 0, 0 }; // NB: values are ignored
+    pCommandList->ClearUnorderedAccessViewUint(fbGpuHandle, fbCpuHandle, pFeedbackTexture, clearValue, 0, nullptr);
 
     D3D12_INDEX_BUFFER_VIEW ibv {
         pIndexBuffer->GetGPUVirtualAddress(),
@@ -1610,38 +1725,80 @@ void Harmony::PopulateCommandList() {
     pCommandList->IASetIndexBuffer(&ibv);
     pCommandList->IASetVertexBuffers(0, 1, &vbv);
 
-    ID3D12DescriptorHeap* pDescHeaps[2] = { pSrvHeap, pSmpHeap };
-
-    pCommandList->SetDescriptorHeaps(2, pDescHeaps);
+    D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = pSrvHeap->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE uavGpuHandle = { srvGpuHandle.ptr + srvDescriptorSize };
 
     pCommandList->SetGraphicsRootConstantBufferView(0, pConstantBuffer->GetGPUVirtualAddress() + frameIndex * sizeof(UniformBuffer) );
-    pCommandList->SetGraphicsRootDescriptorTable(1, pSrvHeap->GetGPUDescriptorHandleForHeapStart());
-    pCommandList->SetGraphicsRootDescriptorTable(2, pSmpHeap->GetGPUDescriptorHandleForHeapStart());
+    pCommandList->SetGraphicsRootDescriptorTable(1, srvGpuHandle);
+    pCommandList->SetGraphicsRootDescriptorTable(2, uavGpuHandle);
+    pCommandList->SetGraphicsRootDescriptorTable(3, pSmpHeap->GetGPUDescriptorHandleForHeapStart());
 
     pCommandList->DrawIndexedInstanced(12, 1, 0, 0, 0);
 
-    std::swap(dsBarrier.Transition.StateBefore, dsBarrier.Transition.StateAfter);
-    std::swap(rtBarrier.Transition.StateBefore, rtBarrier.Transition.StateAfter);
+    // transition feedback resource from UNORDERED_ACCESS to RESOLVE_SOURCE
+    D3D12_RESOURCE_BARRIER rsBarrier {
+        .Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+        .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        .Transition = {
+            .pResource   = pFeedbackTexture,
+            .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            .StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            .StateAfter  = D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
+        }
+    };
+    pCommandList->ResourceBarrier(1, &rsBarrier);
+    
+    // resolve the feedback directly to host readable resource (buffer)
+    pCommandList->ResolveSubresourceRegion(pFeedbackBuffer,
+        0,                  // decode target only has 1 layer (or is a buffer)
+        0, 0,               // no offsets
+        pFeedbackTexture,
+        UINT_MAX,           // decode all src subresources
+        nullptr,
+        DXGI_FORMAT_R8_UINT, // target format must be R8_UINT
+        D3D12_RESOLVE_MODE_DECODE_SAMPLER_FEEDBACK // resolve feedback mode
+    );
 
-    D3D12_RESOURCE_BARRIER barriersOut[] = { rtBarrier, dsBarrier };
-    pCommandList->ResourceBarrier(2, barriersOut);
+    // RT -> Present barriers, feedback RESOURCE_SRC -> UAV
+    {
+        std::swap(dsBarrier.Transition.StateBefore, dsBarrier.Transition.StateAfter);
+        std::swap(rtBarrier.Transition.StateBefore, rtBarrier.Transition.StateAfter);
+        std::swap(rsBarrier.Transition.StateBefore, rsBarrier.Transition.StateAfter);
+
+        D3D12_RESOURCE_BARRIER barriersOut[] = { rtBarrier, dsBarrier, rsBarrier };
+        pCommandList->ResourceBarrier(3, barriersOut);
+    }
 
     pCommandList->Close();
 }
 
-void Harmony::MoveToNextFrame() {
+void Harmony::MoveToNextFrame(bool singlestep) {
     auto curFenceVal = fenceValues[frameIndex];
 
     // signal in cmd queue
     pCommandQueue->Signal(pFence, curFenceVal);
 
     // move frame index
-    frameIndex = pSwapChain4->GetCurrentBackBufferIndex();
+    if (!singlestep)
+    {
+        // move first, then wait if GPU isn't done on that frame 
+        frameIndex = pSwapChain4->GetCurrentBackBufferIndex();
 
-    if (pFence->GetCompletedValue() < fenceValues[frameIndex]) {
-        pFence->SetEventOnCompletion(fenceValues[frameIndex], fenceHandle);
+        if (pFence->GetCompletedValue() < fenceValues[frameIndex]) {
+            pFence->SetEventOnCompletion(fenceValues[frameIndex], fenceHandle);
 
-        WaitForSingleObjectEx(fenceHandle, INFINITE, FALSE);
+            WaitForSingleObjectEx(fenceHandle, INFINITE, FALSE);
+        }
+    }
+    else {
+        // wait first then move 
+        if (pFence->GetCompletedValue() < fenceValues[frameIndex]) {
+            pFence->SetEventOnCompletion(fenceValues[frameIndex], fenceHandle);
+
+            WaitForSingleObjectEx(fenceHandle, INFINITE, FALSE);
+        }
+
+        frameIndex = pSwapChain4->GetCurrentBackBufferIndex();
     }
 
     fenceValues[frameIndex] = curFenceVal + 1;
